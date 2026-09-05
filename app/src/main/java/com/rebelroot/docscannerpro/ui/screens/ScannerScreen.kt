@@ -1,16 +1,17 @@
 package com.rebelroot.docscannerpro.ui.screens
+
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.graphics.ImageFormat
-import android.graphics.YuvImage
+import android.graphics.Matrix
 import android.graphics.Rect
-import android.net.Uri
+import android.graphics.YuvImage
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -18,28 +19,27 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -51,9 +51,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,6 +66,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -73,30 +74,37 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import coil.compose.AsyncImage
-import com.rebelroot.docscannerpro.core.model.BarcodeType
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.rebelroot.docscannerpro.core.model.QuadCorners
+import com.rebelroot.docscannerpro.ui.viewmodel.CaptureState
 import com.rebelroot.docscannerpro.ui.viewmodel.IdCardSide
 import com.rebelroot.docscannerpro.ui.viewmodel.ScanMode
 import com.rebelroot.docscannerpro.ui.viewmodel.ScanViewModel
-import java.io.File
+import com.rebelroot.docscannerpro.ui.viewmodel.ScannerStatus
+import com.rebelroot.docscannerpro.ui.viewmodel.ScannedPageDraft
 import java.util.concurrent.Executors
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
+
 @Composable
 fun ScannerScreen(
     viewModel: ScanViewModel,
@@ -105,7 +113,9 @@ fun ScannerScreen(
     onBatchFinished: (documentId: String) -> Unit
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current
+    val hapticFeedback = LocalHapticFeedback.current
+
     val scanMode by viewModel.scanMode.collectAsState()
     val idSide by viewModel.idCardSide.collectAsState()
     val isFlashOn by viewModel.isFlashOn.collectAsState()
@@ -115,22 +125,34 @@ fun ScannerScreen(
     val guidanceMessage by viewModel.guidanceMessage.collectAsState()
     val isStable by viewModel.isStableAndReady.collectAsState()
     val capturedPages by viewModel.capturedPages.collectAsState()
-    val isProcessing by viewModel.isProcessing.collectAsState()
     val scannedBarcode by viewModel.scannedBarcode.collectAsState()
+    val qrResult by viewModel.qrResult.collectAsState()
     val analyzedFrameSize by viewModel.analyzedFrameSize.collectAsState()
+    val scannerStatus by viewModel.scannerStatus.collectAsState()
+    val captureState by viewModel.captureState.collectAsState()
+
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var cameraControl: androidx.camera.core.CameraControl? by remember { mutableStateOf(null) }
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    DisposableEffect(Unit) {
-        val window = (context as? android.app.Activity)?.window
-        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
-        controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        onDispose {
-            controller?.show(WindowInsetsCompat.Type.systemBars())
-            cameraExecutor.shutdown()
+    var rebindTrigger by remember { mutableIntStateOf(0) }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val captureExecutor = remember { Executors.newSingleThreadExecutor() }
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         }
     }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching {
+                ProcessCameraProvider.getInstance(context).get().unbindAll()
+            }
+            analysisExecutor.shutdown()
+            captureExecutor.shutdown()
+        }
+    }
+
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -140,158 +162,184 @@ fun ScannerScreen(
                 val bitmap = BitmapFactory.decodeStream(inputStream)
                 inputStream?.close()
                 if (bitmap != null) {
-                    viewModel.captureFrame(bitmap)
-                    onNavigateToCrop()
+                    viewModel.captureFrame(bitmap, QuadCorners.defaultQuad(1f, 1f), treatAsUndetected = true)
+                } else {
+                    viewModel.setCaptureFailed("Could not read the selected image")
                 }
-            } catch (_: Exception) {
+            } catch (t: Throwable) {
+                viewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
             }
         }
     }
+
+    fun bindCamera() {
+        viewModel.setScannerStatus(ScannerStatus.Starting)
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        cameraProviderFuture.addListener({
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                cameraProvider.unbindAll()
+                val preview = Preview.Builder().build().also {
+                    it.surfaceProvider = previewView.surfaceProvider
+                }
+                val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setTargetRotation(rotation)
+                    .build()
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setTargetRotation(rotation)
+                    .build()
+                    .also { analyzer ->
+                        var lastAnalysisNanos = 0L
+                        analyzer.setAnalyzer(analysisExecutor) { imageProxy ->
+                            try {
+                                val now = System.nanoTime()
+                                if (now - lastAnalysisNanos < 100_000_000L) return@setAnalyzer
+                                lastAnalysisNanos = now
+                                val bitmap = imageProxyToBitmap(imageProxy)
+                                if (bitmap != null) viewModel.onFrameAnalyzed(bitmap)
+                            } catch (t: Throwable) {
+                                Log.e("ScannerScreen", "Frame analysis failed", t)
+                            } finally {
+                                runCatching { imageProxy.close() }
+                            }
+                        }
+                    }
+                val cam = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    capture,
+                    analysis
+                )
+                imageCapture = capture
+                cameraControl = cam.cameraControl
+                cam.cameraInfo.cameraState.observe(lifecycleOwner) { state ->
+                    val error = state.error
+                    when {
+                        error != null -> viewModel.setScannerStatus(
+                            ScannerStatus.RecoverableError(describeCameraError(error.code))
+                        )
+                        state.type == CameraState.Type.OPEN -> viewModel.setScannerStatus(ScannerStatus.Ready)
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e("ScannerScreen", "Camera binding failed", t)
+                viewModel.setScannerStatus(
+                    ScannerStatus.Unavailable(
+                        "Camera could not start. Another app may be holding it, or the device reports no cameras. Try again in a moment."
+                    )
+                )
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    LaunchedEffect(rebindTrigger) {
+        bindCamera()
+    }
     LaunchedEffect(isFlashOn) {
-        cameraControl?.enableTorch(isFlashOn)
+        runCatching { cameraControl?.enableTorch(isFlashOn) }
     }
-    val editingPage by viewModel.editingPage.collectAsState()
-    LaunchedEffect(editingPage?.id, scanMode) {
-        if (editingPage != null && scanMode != ScanMode.MULTI_PAGE && scanMode != ScanMode.BOOK) {
-            onNavigateToCrop()
-        }
+    LaunchedEffect(qrResult?.timestamp) {
+        if (qrResult != null) hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
     }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
         AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-                }
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                val executor = ContextCompat.getMainExecutor(ctx)
-                val analysisExecutor = cameraExecutor
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-                    val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
-                    val capture = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setTargetRotation(rotation)
-                        .build()
-                    imageCapture = capture
-                    val analysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setTargetRotation(rotation)
-                        .build()
-                        .also { analyzer ->
-                            var lastAnalysisNanos = 0L
-                        analyzer.setAnalyzer(analysisExecutor) { imageProxy ->
-                            val now = System.nanoTime()
-                            if (now - lastAnalysisNanos < 90_000_000L) {
-                                imageProxy.close()
-                                return@setAnalyzer
-                            }
-                            lastAnalysisNanos = now
-                            val bitmap = imageProxyToBitmap(imageProxy)
-                            imageProxy.close()
-                            if (bitmap != null) viewModel.onFrameAnalyzed(bitmap)
-                        }
-                        }
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                    try {
-                        cameraProvider.unbindAll()
-                        val cam = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            preview,
-                            capture,
-                            analysis
-                        )
-                        cameraControl = cam.cameraControl
-                    } catch (_: Exception) {
-                    }
-                }, executor)
-                previewView
-            },
+            factory = { previewView },
             modifier = Modifier.fillMaxSize()
         )
-        DocumentQuadOverlay(
-            corners = detectedCorners,
-            isRealDetection = hasRealDetection,
-            isStable = isStable,
-            scanMode = scanMode,
-            idCardSide = idSide,
-            sourceWidth = analyzedFrameSize.width,
-            sourceHeight = analyzedFrameSize.height
-        )
+        if (scanMode == ScanMode.QR_BARCODE) {
+            QrReticleOverlay()
+        } else {
+            DocumentQuadOverlay(
+                corners = detectedCorners,
+                isRealDetection = hasRealDetection,
+                isStable = isStable,
+                scanMode = scanMode,
+                idCardSide = idSide,
+                sourceWidth = analyzedFrameSize.width,
+                sourceHeight = analyzedFrameSize.height
+            )
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 18.dp, start = 14.dp, end = 14.dp),
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.Top
         ) {
             ScannerControlButton(
                 icon = Icons.Default.Close,
-                description = "Close",
+                description = "Close scanner",
                 onClick = onClose,
                 selected = false,
                 modifier = Modifier.testTag("btn_close_scanner")
             )
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color.Black.copy(alpha = 0.50f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+            if (scanMode != ScanMode.QR_BARCODE) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color.Black.copy(alpha = 0.50f)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(if (isStable) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.72f))
-                        )
-                        Spacer(Modifier.width(8.dp))
+                        Row(
+                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isStable) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.72f))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = guidanceMessage,
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color.Black.copy(alpha = 0.32f)
+                    ) {
                         Text(
-                            text = guidanceMessage,
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Medium
+                            text = when (scanMode) {
+                                ScanMode.DOCUMENT -> "Document"
+                                ScanMode.ID_CARD -> "ID card ${if (idSide == IdCardSide.FRONT) "· Front" else "· Back"}"
+                                ScanMode.RECEIPT -> "Receipt"
+                                ScanMode.BUSINESS_CARD -> "Business card"
+                                ScanMode.BOOK -> "Book"
+                                ScanMode.QR_BARCODE -> "QR / Barcode"
+                                ScanMode.MULTI_PAGE -> "Document"
+                            },
+                            color = Color.White.copy(alpha = 0.9f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = Color.Black.copy(alpha = 0.32f)
-                ) {
-                    Text(
-                        text = when (scanMode) {
-                            ScanMode.DOCUMENT -> "Document"
-                            ScanMode.ID_CARD -> "ID card ${if (idSide == IdCardSide.FRONT) "· Front" else "· Back"}"
-                            ScanMode.RECEIPT -> "Receipt"
-                            ScanMode.BUSINESS_CARD -> "Business card"
-                            ScanMode.BOOK -> "Book"
-                            ScanMode.QR_BARCODE -> "QR / Barcode"
-                            ScanMode.MULTI_PAGE -> "Document"
-                        },
-                        color = Color.White.copy(alpha = 0.9f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
-                    )
-                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ScannerControlButton(
-                    icon = Icons.Default.CenterFocusStrong,
-                    description = if (isAutoCapture) "Auto capture on" else "Auto capture off",
-                    onClick = { viewModel.toggleAutoCapture() },
-                    selected = isAutoCapture
-                )
+                if (scanMode != ScanMode.QR_BARCODE) {
+                    ScannerControlButton(
+                        icon = Icons.Default.CenterFocusStrong,
+                        description = if (isAutoCapture) "Auto capture on" else "Auto capture off",
+                        onClick = { viewModel.toggleAutoCapture() },
+                        selected = isAutoCapture
+                    )
+                }
                 ScannerControlButton(
                     icon = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
                     description = if (isFlashOn) "Flash off" else "Flash on",
@@ -300,64 +348,109 @@ fun ScannerScreen(
                 )
             }
         }
+
+        when (val status = scannerStatus) {
+            is ScannerStatus.RecoverableError -> CameraErrorBanner(
+                modifier = Modifier.align(Alignment.Center),
+                message = status.message,
+                actionLabel = "Retry",
+                onAction = { rebindTrigger++ },
+                onDismiss = { viewModel.setScannerStatus(ScannerStatus.Ready) }
+            )
+            is ScannerStatus.Unavailable -> CameraErrorBanner(
+                modifier = Modifier.align(Alignment.Center),
+                message = status.message,
+                actionLabel = "Try again",
+                onAction = { rebindTrigger++ },
+                onDismiss = onClose
+            )
+            else -> Unit
+        }
+
+        when (val state = captureState) {
+            is CaptureState.Failed -> CameraErrorBanner(
+                modifier = Modifier.align(Alignment.Center),
+                message = state.message,
+                actionLabel = "OK",
+                onAction = { viewModel.dismissCaptureFailure() },
+                onDismiss = null
+            )
+            else -> Unit
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .background(Color.Black.copy(alpha = 0.62f))
-                .padding(top = 8.dp, bottom = 14.dp),
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(top = 8.dp, bottom = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (capturedPages.isNotEmpty()) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = Color.White.copy(alpha = 0.12f)
-                ) {
+            if (scanMode != ScanMode.QR_BARCODE) {
+                if (capturedPages.isNotEmpty()) {
+                    PageThumbnailStrip(
+                        pages = capturedPages,
+                        onTapPage = { draft ->
+                            viewModel.editPage(draft)
+                            onNavigateToCrop()
+                        },
+                        onRemovePage = { viewModel.retakePage(it) }
+                    )
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         text = "${capturedPages.size} ${if (capturedPages.size == 1) "page" else "pages"}",
                         color = Color.White,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        style = MaterialTheme.typography.labelMedium
                     )
+                    Spacer(Modifier.height(4.dp))
                 }
-                Spacer(Modifier.height(8.dp))
-            }
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(22.dp),
-                contentPadding = PaddingValues(horizontal = 20.dp),
-                modifier = Modifier.padding(bottom = 11.dp)
-            ) {
-                items(listOf(ScanMode.DOCUMENT, ScanMode.ID_CARD, ScanMode.RECEIPT, ScanMode.BUSINESS_CARD, ScanMode.BOOK, ScanMode.QR_BARCODE)) { mode ->
-                    val isSelected = scanMode == mode
-                    val label = when (mode) {
-                        ScanMode.DOCUMENT -> "Document"
-                        ScanMode.ID_CARD -> "ID card"
-                        ScanMode.RECEIPT -> "Receipt"
-                        ScanMode.BUSINESS_CARD -> "Card"
-                        ScanMode.BOOK -> "Book"
-                        ScanMode.QR_BARCODE -> "QR / Barcode"
-                        ScanMode.MULTI_PAGE -> "Document"
-                    }
-                    Column(
-                        modifier = Modifier.clickable { viewModel.setScanMode(mode) }.padding(vertical = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            label,
-                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.58f),
-                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                        Spacer(Modifier.height(5.dp))
-                        Box(
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(22.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    modifier = Modifier.padding(bottom = 11.dp)
+                ) {
+                    items(listOf(ScanMode.DOCUMENT, ScanMode.ID_CARD, ScanMode.RECEIPT, ScanMode.BUSINESS_CARD, ScanMode.BOOK, ScanMode.QR_BARCODE)) { mode ->
+                        val isSelected = scanMode == mode
+                        val label = when (mode) {
+                            ScanMode.DOCUMENT -> "Document"
+                            ScanMode.ID_CARD -> "ID card"
+                            ScanMode.RECEIPT -> "Receipt"
+                            ScanMode.BUSINESS_CARD -> "Card"
+                            ScanMode.BOOK -> "Book"
+                            ScanMode.QR_BARCODE -> "QR / Barcode"
+                            ScanMode.MULTI_PAGE -> "Document"
+                        }
+                        Column(
                             modifier = Modifier
-                                .width(if (isSelected) 18.dp else 0.dp)
-                                .height(2.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF5AA7FF))
-                        )
+                                .clickable { viewModel.setScanMode(mode) }
+                                .padding(vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                label,
+                                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.58f),
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Spacer(Modifier.height(5.dp))
+                            Box(
+                                modifier = Modifier
+                                    .width(if (isSelected) 18.dp else 0.dp)
+                                    .height(2.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF5AA7FF))
+                            )
+                        }
                     }
                 }
+            } else {
+                Text(
+                    text = "Hold steady over the code",
+                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(vertical = 10.dp)
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
@@ -374,45 +467,82 @@ fun ScannerScreen(
                     },
                     testTag = "btn_gallery_import"
                 )
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(84.dp)
-                        .clickable(enabled = !isProcessing) {
-                            imageCapture?.takePicture(
-                                cameraExecutor,
-                                object : ImageCapture.OnImageCapturedCallback() {
-                                    override fun onCaptureSuccess(image: ImageProxy) {
-                                        val bitmap = imageProxyToBitmap(image)
-                                        image.close()
-                                        if (bitmap != null) viewModel.captureFrame(bitmap)
-                                    }
-                                    override fun onError(exception: ImageCaptureException) = Unit
+                if (scanMode != ScanMode.QR_BARCODE) {
+                    val canCapture = scannerStatus == ScannerStatus.Ready &&
+                        captureState != CaptureState.Capturing &&
+                        captureState != CaptureState.Processing
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(84.dp)
+                            .clickable(
+                                enabled = canCapture,
+                                onClickLabel = "Take scan"
+                            ) {
+                                viewModel.beginCapture()
+                                val capture = imageCapture
+                                if (capture == null) {
+                                    viewModel.setCaptureFailed("Camera is not ready yet")
+                                } else {
+                                    capture.takePicture(
+                                        captureExecutor,
+                                        object : ImageCapture.OnImageCapturedCallback() {
+                                            override fun onCaptureSuccess(image: ImageProxy) {
+                                                val bitmap = try {
+                                                    imageProxyToBitmap(image)
+                                                } finally {
+                                                    runCatching { image.close() }
+                                                }
+                                                if (bitmap != null) {
+                                                    viewModel.captureFrame(bitmap)
+                                                } else {
+                                                    viewModel.setCaptureFailed("Captured image could not be read")
+                                                }
+                                            }
+
+                                            override fun onError(exception: ImageCaptureException) {
+                                                viewModel.setCaptureFailed(
+                                                    "Capture failed: ${exception.message ?: "camera error"}"
+                                                )
+                                            }
+                                        }
+                                    )
                                 }
+                            }
+                            .semantics { role = Role.Button }
+                            .testTag("btn_shutter")
+                    ) {
+                        Canvas(modifier = Modifier.size(84.dp)) {
+                            drawCircle(
+                                color = if (isStable) Color(0xFF5AA7FF) else Color.White.copy(alpha = 0.88f),
+                                style = Stroke(width = 3.5.dp.toPx())
                             )
                         }
-                        .testTag("btn_shutter")
-                ) {
-                    Canvas(modifier = Modifier.size(84.dp)) {
-                        drawCircle(
-                            color = if (isStable) Color(0xFF5AA7FF) else Color.White.copy(alpha = 0.88f),
-                            style = Stroke(width = 3.5.dp.toPx())
-                        )
-                    }
-                    Surface(
-                        shape = CircleShape,
-                        color = if (isProcessing) Color(0xFFB9B9BC) else Color.White,
-                        modifier = Modifier.size(68.dp),
-                        shadowElevation = 3.dp
-                    ) {
-                        if (isProcessing) {
-                            Box(contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = Color(0xFF3D3D42), modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                        Surface(
+                            shape = CircleShape,
+                            color = when {
+                                captureState == CaptureState.Processing -> Color(0xFFB9B9BC)
+                                captureState == CaptureState.Capturing -> Color(0xFFDCDCE0)
+                                else -> Color.White
+                            },
+                            modifier = Modifier.size(68.dp),
+                            shadowElevation = 3.dp
+                        ) {
+                            if (captureState == CaptureState.Processing) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(
+                                        color = Color(0xFF3D3D42),
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.5.dp
+                                    )
+                                }
                             }
                         }
                     }
+                } else {
+                    Spacer(Modifier.size(84.dp))
                 }
-                if (capturedPages.isNotEmpty()) {
+                if (scanMode != ScanMode.QR_BARCODE && capturedPages.isNotEmpty()) {
                     ScannerUtilityButton(
                         icon = Icons.Default.Check,
                         label = "Done",
@@ -424,57 +554,132 @@ fun ScannerScreen(
                 }
             }
         }
+
         scannedBarcode?.let { barcode ->
             AlertDialog(
                 onDismissRequest = { viewModel.dismissScannedBarcode() },
                 title = { Text(barcode.formatName) },
-                text = {
-                    Column {
-                        Text(
-                            text = barcode.displayValue,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 15.sp
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Type: ${barcode.type}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                    }
-                },
+                text = { Text(barcode.displayValue) },
                 confirmButton = {
-                    if (barcode.type == BarcodeType.URL) {
-                        Button(
-                            onClick = {
-                                try {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(barcode.rawValue))
-                                    context.startActivity(intent)
-                                } catch (_: Exception) {
-                                }
-                                viewModel.dismissScannedBarcode()
-                            }
-                        ) {
-                            Text("Open Link")
-                        }
-                    } else {
-                        Button(
-                            onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Barcode", barcode.rawValue))
-                                viewModel.dismissScannedBarcode()
-                            }
-                        ) {
-                            Text("Copy Text")
-                        }
-                    }
-                },
-                dismissButton = {
                     TextButton(onClick = { viewModel.dismissScannedBarcode() }) {
                         Text("Close")
                     }
                 }
             )
+        }
+
+        qrResult?.let { result ->
+            QrResultSheet(
+                result = result,
+                history = viewModel.qrHistory.collectAsState(initial = emptyList()).value,
+                onDismiss = { viewModel.dismissQrResult() },
+                onDeleteHistory = { viewModel.deleteHistoryEntry(it) },
+                onClearHistory = { viewModel.clearHistory() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.CameraErrorBanner(
+    modifier: Modifier = Modifier,
+    message: String,
+    actionLabel: String,
+    onAction: () -> Unit,
+    onDismiss: (() -> Unit)?
+) {
+    Surface(
+        color = Color(0xFF7F1D1D).copy(alpha = 0.94f),
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier
+            .padding(horizontal = 24.dp)
+            .fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = message,
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onAction) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(actionLabel)
+                }
+                if (onDismiss != null) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Continue anyway", color = Color.White.copy(alpha = 0.85f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageThumbnailStrip(
+    pages: List<ScannedPageDraft>,
+    onTapPage: (ScannedPageDraft) -> Unit,
+    onRemovePage: (ScannedPageDraft) -> Unit
+) {
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 20.dp)
+    ) {
+        items(pages, key = { it.id }) { page ->
+            val thumb = page.thumbnail ?: page.processedBitmap
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF22252B))
+                    .border(1.5.dp, Color(0xFF5AA7FF), RoundedCornerShape(10.dp))
+                    .pointerInput(page.id) {
+                        detectTapGestures(
+                            onLongPress = { onRemovePage(page) },
+                            onTap = { onTapPage(page) }
+                        )
+                    }
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = thumb.asImageBitmap(),
+                    contentDescription = "Captured page ${pages.indexOf(page) + 1}. Tap to crop, long-press to remove.",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QrReticleOverlay() {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val side = minOf(size.width, size.height) * 0.68f
+        val left = (size.width - side) / 2f
+        val top = (size.height - side) / 2f
+        val dim = Color.Black.copy(alpha = 0.45f)
+        drawRect(dim, Offset(0f, 0f), Size(size.width, top))
+        drawRect(dim, Offset(0f, top + side), Size(size.width, size.height - top - side))
+        drawRect(dim, Offset(0f, top), Size(left, side))
+        drawRect(dim, Offset(left + side, top), Size(size.width - left - side, side))
+        val stroke = 4.dp.toPx()
+        val bracket = 26.dp.toPx()
+        val c = Color(0xFF5AA7FF)
+        listOf(
+            Offset(left, top) to Offset(1f, 1f),
+            Offset(left + side, top) to Offset(-1f, 1f),
+            Offset(left + side, top + side) to Offset(-1f, -1f),
+            Offset(left, top + side) to Offset(1f, -1f)
+        ).forEach { (p, dir) ->
+            drawLine(c, p, Offset(p.x + bracket * dir.x, p.y), stroke, StrokeCap.Round)
+            drawLine(c, p, Offset(p.x, p.y + bracket * dir.y), stroke, StrokeCap.Round)
         }
     }
 }
@@ -599,6 +804,19 @@ fun DocumentQuadOverlay(
         }
     }
 }
+
+private fun describeCameraError(code: Int): String = when (code) {
+    CameraState.ERROR_CAMERA_IN_USE -> "Camera is in use by another app. Close it and retry."
+    CameraState.ERROR_MAX_CAMERAS_IN_USE -> "Too many camera apps are open. Close others and retry."
+    CameraState.ERROR_CAMERA_DISABLED -> "Camera is disabled by device policy."
+    CameraState.ERROR_STREAM_CONFIG -> "Camera configuration failed on this device."
+    CameraState.ERROR_CAMERA_FATAL_ERROR -> "Camera failed unexpectedly."
+    CameraState.ERROR_OTHER_RECOVERABLE_ERROR -> "Camera hit a recoverable error."
+    CameraState.ERROR_CAMERA_REMOVED -> "Camera is no longer available on this device."
+    CameraState.ERROR_DO_NOT_DISTURB_MODE_ENABLED -> "Camera is blocked by Do Not Disturb mode."
+    else -> "Camera error."
+}
+
 private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     return try {
         when (image.format) {
@@ -631,7 +849,7 @@ private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
                 }
                 val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
                 val stream = java.io.ByteArrayOutputStream()
-                yuv.compressToJpeg(Rect(0, 0, width, height), 92, stream)
+                yuv.compressToJpeg(Rect(0, 0, width, height), 85, stream)
                 val raw = BitmapFactory.decodeByteArray(stream.toByteArray(), 0, stream.size()) ?: return null
                 rotateBitmap(raw, image.imageInfo.rotationDegrees)
             }
@@ -641,6 +859,7 @@ private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
         null
     }
 }
+
 private fun copyPlane(plane: ImageProxy.PlaneProxy, width: Int, height: Int, out: ByteArray, outOffset: Int, pixelStrideOverride: Int? = null) {
     val buffer = plane.buffer.duplicate()
     val rowStride = plane.rowStride
@@ -657,6 +876,7 @@ private fun copyPlane(plane: ImageProxy.PlaneProxy, width: Int, height: Int, out
         }
     }
 }
+
 private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
     if (degrees == 0) return bitmap
     val matrix = Matrix().apply { postRotate(degrees.toFloat()) }

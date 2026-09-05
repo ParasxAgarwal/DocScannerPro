@@ -107,10 +107,13 @@ fun AppNavigation(
             val bitmap = BitmapFactory.decodeStream(stream)
             stream?.close()
             if (bitmap != null) {
-                scanViewModel.captureFrame(bitmap)
+                scanViewModel.captureFrame(bitmap, com.rebelroot.docscannerpro.core.model.QuadCorners.defaultQuad(1f, 1f), treatAsUndetected = true)
                 navController.navigate(Screen.ManualCrop.route)
+            } else {
+                scanViewModel.setCaptureFailed("Could not read the selected image")
             }
-        } catch (_: Exception) {
+        } catch (t: Exception) {
+            scanViewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
         }
     }
     NavHost(
