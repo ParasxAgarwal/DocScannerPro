@@ -73,7 +73,9 @@ sealed class Screen(val route: String) {
 @Composable
 fun AppNavigation(
     documentViewModel: DocumentViewModel = viewModel(),
-    scanViewModel: ScanViewModel = viewModel()
+    scanViewModel: ScanViewModel = viewModel(),
+    quickMode: ScanMode? = null,
+    onQuickModeConsumed: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val context = LocalContext.current
@@ -101,19 +103,43 @@ fun AppNavigation(
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
-    fun importImageUri(uri: Uri) {
-        try {
-            val stream = context.contentResolver.openInputStream(uri)
-            val bitmap = BitmapFactory.decodeStream(stream)
-            stream?.close()
-            if (bitmap != null) {
-                scanViewModel.captureFrame(bitmap, com.rebelroot.docscannerpro.core.model.QuadCorners.defaultQuad(1f, 1f), treatAsUndetected = true)
-                navController.navigate(Screen.ManualCrop.route)
-            } else {
-                scanViewModel.setCaptureFailed("Could not read the selected image")
+
+    androidx.compose.runtime.LaunchedEffect(quickMode) {
+        if (quickMode != null) {
+            startScanning(quickMode)
+            onQuickModeConsumed()
+        }
+    }
+    fun importImages(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val bitmaps = uris.mapNotNull { uri ->
+            try {
+                val stream = context.contentResolver.openInputStream(uri)
+                val bitmap = BitmapFactory.decodeStream(stream)
+                stream?.close()
+                bitmap
+            } catch (t: Exception) {
+                scanViewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
+                null
             }
-        } catch (t: Exception) {
-            scanViewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
+        }
+        if (bitmaps.isEmpty()) {
+            scanViewModel.setCaptureFailed("Could not read the selected images")
+            return
+        }
+        if (bitmaps.size == 1) {
+            // Single image: go straight to the crop editor like before.
+            scanViewModel.captureFrame(
+                bitmaps.first(),
+                com.rebelroot.docscannerpro.core.model.QuadCorners.defaultQuad(1f, 1f),
+                treatAsUndetected = true
+            )
+            navController.navigate(Screen.ManualCrop.route)
+        } else {
+            // Batch: all images become pages of one session; review and save
+            // from the scanner screen (thumbnail strip + Done -> PDF).
+            scanViewModel.importImages(bitmaps)
+            startScanning(ScanMode.DOCUMENT)
         }
     }
     NavHost(
@@ -129,7 +155,7 @@ fun AppNavigation(
                 onNavigateToTools = { navController.navigate(Screen.Tools.route) },
                 onNavigateToFavorites = { documentViewModel.setCategory(com.rebelroot.docscannerpro.ui.viewmodel.CategoryFilter.FAVORITES) },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
-                onImportImage = { uri -> importImageUri(uri) }
+                onImportImages = { uris -> importImages(uris) }
             )
         }
         composable(

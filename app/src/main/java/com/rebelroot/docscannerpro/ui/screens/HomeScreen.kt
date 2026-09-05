@@ -106,7 +106,7 @@ fun HomeScreen(
     onNavigateToDocuments: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToSettings: () -> Unit,
-    onImportImage: (Uri) -> Unit
+    onImportImages: (List<Uri>) -> Unit
 ) {
     val documents by viewModel.documents.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -122,8 +122,8 @@ fun HomeScreen(
     var viewMode by remember { mutableStateOf(LibraryView.LIST) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia()
-    ) { uri -> uri?.let(onImportImage) }
+        ActivityResultContracts.PickMultipleVisualMedia(maxItems = 30)
+    ) { uris -> if (uris.isNotEmpty()) onImportImages(uris) }
 
     val visibleDocuments = remember(documents, sortMode) {
         when (sortMode) {

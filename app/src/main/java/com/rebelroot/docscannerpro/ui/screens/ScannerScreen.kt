@@ -152,20 +152,24 @@ fun ScannerScreen(
     }
 
     val photoPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                val bitmap = BitmapFactory.decodeStream(inputStream)
-                inputStream?.close()
-                if (bitmap != null) {
-                    viewModel.captureFrame(bitmap, QuadCorners.defaultQuad(1f, 1f), treatAsUndetected = true)
-                } else {
-                    viewModel.setCaptureFailed("Could not read the selected image")
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 30)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val bitmaps = uris.mapNotNull { uri ->
+                try {
+                    val stream = context.contentResolver.openInputStream(uri)
+                    val bitmap = BitmapFactory.decodeStream(stream)
+                    stream?.close()
+                    bitmap
+                } catch (t: Throwable) {
+                    Log.e("ScannerScreen", "Import of $uri failed", t)
+                    null
                 }
-            } catch (t: Throwable) {
-                viewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
+            }
+            if (bitmaps.isEmpty()) {
+                viewModel.setCaptureFailed("Could not read the selected images")
+            } else {
+                viewModel.importImages(bitmaps)
             }
         }
     }
@@ -282,7 +286,7 @@ fun ScannerScreen(
                 selected = false,
                 modifier = Modifier.testTag("btn_close_scanner")
             )
-            if (scanMode != ScanMode.QR_BARCODE) {
+            if (scanMode != ScanMode.QR_BARCODE && scanMode != ScanMode.PHOTO) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -319,6 +323,7 @@ fun ScannerScreen(
                                 ScanMode.RECEIPT -> "Receipt"
                                 ScanMode.BUSINESS_CARD -> "Business card"
                                 ScanMode.BOOK -> "Book"
+                                ScanMode.PHOTO -> "Photo"
                                 ScanMode.QR_BARCODE -> "QR / Barcode"
                                 ScanMode.MULTI_PAGE -> "Document"
                             },
@@ -330,7 +335,7 @@ fun ScannerScreen(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (scanMode != ScanMode.QR_BARCODE) {
+                if (scanMode != ScanMode.QR_BARCODE && scanMode != ScanMode.PHOTO) {
                     ScannerControlButton(
                         icon = Icons.Default.CenterFocusStrong,
                         description = if (isAutoCapture) "Auto capture on" else "Auto capture off",
@@ -408,7 +413,7 @@ fun ScannerScreen(
                     contentPadding = PaddingValues(horizontal = 20.dp),
                     modifier = Modifier.padding(bottom = 11.dp)
                 ) {
-                    items(listOf(ScanMode.DOCUMENT, ScanMode.ID_CARD, ScanMode.RECEIPT, ScanMode.BUSINESS_CARD, ScanMode.BOOK, ScanMode.QR_BARCODE)) { mode ->
+                    items(listOf(ScanMode.DOCUMENT, ScanMode.ID_CARD, ScanMode.RECEIPT, ScanMode.BUSINESS_CARD, ScanMode.BOOK, ScanMode.PHOTO, ScanMode.QR_BARCODE)) { mode ->
                         val isSelected = scanMode == mode
                         val label = when (mode) {
                             ScanMode.DOCUMENT -> "Document"
@@ -416,6 +421,7 @@ fun ScannerScreen(
                             ScanMode.RECEIPT -> "Receipt"
                             ScanMode.BUSINESS_CARD -> "Card"
                             ScanMode.BOOK -> "Book"
+                            ScanMode.PHOTO -> "Photo"
                             ScanMode.QR_BARCODE -> "QR / Barcode"
                             ScanMode.MULTI_PAGE -> "Document"
                         }
@@ -818,6 +824,16 @@ private fun describeCameraError(code: Int): String = when (code) {
 private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     return try {
         when (image.format) {
+            // ImageCapture delivers JPEG frames — decode the plane directly.
+            // Without this branch every real-device capture failed with
+            // "Captured image could not be read".
+            ImageFormat.JPEG -> {
+                val buffer = image.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                rotateBitmap(raw, image.imageInfo.rotationDegrees)
+            }
             ImageFormat.YUV_420_888 -> {
                 val width = image.width
                 val height = image.height

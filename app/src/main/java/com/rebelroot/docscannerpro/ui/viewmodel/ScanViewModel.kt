@@ -40,6 +40,7 @@ enum class ScanMode {
     RECEIPT,
     BUSINESS_CARD,
     BOOK,
+    PHOTO,
     QR_BARCODE,
     MULTI_PAGE
 }
@@ -179,6 +180,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             ScanMode.BUSINESS_CARD -> "Align business card"
             ScanMode.BOOK -> "Open book flat in frame"
             ScanMode.QR_BARCODE -> "Center QR / Barcode in frame"
+            ScanMode.PHOTO -> "Tap shutter to add photos"
             else -> "Point camera at document"
         }
     }
@@ -193,6 +195,10 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onFrameAnalyzed(bitmap: Bitmap) {
         if (isProcessing.value || captureState.value is CaptureState.Processing) return
+        if (scanMode.value == ScanMode.PHOTO) {
+            // Plain photo mode: no detection, no auto-capture, near-zero CPU.
+            return
+        }
         if (scanMode.value == ScanMode.QR_BARCODE) {
             viewModelScope.launch(Dispatchers.Default) {
                 val region = cropCenterRegion(bitmap, REGION_FRACTION)
@@ -273,6 +279,24 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (scanMode.value == ScanMode.BOOK) {
                     handleBookCapture(copy)
+                    return@launch
+                }
+                if (scanMode.value == ScanMode.PHOTO) {
+                    // Photo mode: keep the frame exactly as captured — no crop,
+                    // no warp, no document enhancement.
+                    val draft = ScannedPageDraft(
+                        originalBitmap = copy,
+                        processedBitmap = copy,
+                        thumbnail = scaleForThumbnail(copy),
+                        corners = QuadCorners.defaultQuad(1f, 1f)
+                    )
+                    persistDraft(draft)
+                    withContext(Dispatchers.Main) {
+                        capturedPages.value = capturedPages.value + draft
+                        guidanceMessage.value = "Photo added • keep going or tap Done"
+                        captureState.value = CaptureState.Idle
+                        isProcessing.value = false
+                    }
                     return@launch
                 }
                 val detected = hasRealDetection.value && !treatAsUndetected
@@ -358,6 +382,48 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         capturedPages.value = capturedPages.value.filterNot { it.id == draft.id }
         draft.sessionOrigPath?.let { File(it).delete() }
         draft.sessionProcPath?.let { File(it).delete() }
+    }
+
+    /**
+     * Batch import: turns a list of gallery images into pages of the current
+     * session. Each page keeps its full frame (user can crop per page from the
+     * thumbnail strip) and gets standard document enhancement.
+     */
+    fun importImages(bitmaps: List<Bitmap>) {
+        if (bitmaps.isEmpty()) return
+        captureState.value = CaptureState.Processing
+        isProcessing.value = true
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val drafts = bitmaps.mapNotNull { bmp ->
+                    try {
+                        val copy = bmp.copy(Bitmap.Config.ARGB_8888, false) ?: return@mapNotNull null
+                        val enhanced = ImageEnhancer.enhanceColorAndContrast(copy)
+                        ScannedPageDraft(
+                            originalBitmap = copy,
+                            processedBitmap = enhanced,
+                            thumbnail = scaleForThumbnail(enhanced),
+                            corners = QuadCorners.defaultQuad(1f, 1f)
+                        ).also { persistDraft(it) }
+                    } catch (t: Throwable) {
+                        android.util.Log.e("ScanViewModel", "Failed to import an image", t)
+                        null
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    capturedPages.value = capturedPages.value + drafts
+                    guidanceMessage.value = "${drafts.size} photo(s) imported • tap Done to save"
+                    captureState.value = CaptureState.Idle
+                    isProcessing.value = false
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("ScanViewModel", "Batch import failed", t)
+                withContext(Dispatchers.Main) {
+                    captureState.value = CaptureState.Failed("Import failed. Try again.")
+                    isProcessing.value = false
+                }
+            }
+        }
     }
 
     fun updateEditingPageCorners(newCorners: QuadCorners) {
