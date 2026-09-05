@@ -10,8 +10,8 @@ android {
     applicationId = "com.rebelroot.docscannerpro"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "1.1"
     missingDimensionStrategy("parallelization", "standard")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -71,6 +71,8 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.zxing.core)
   implementation(libs.opencv)
+  implementation(libs.pdfbox.android)
+  implementation(libs.androidx.exifinterface)
   if (providers.gradleProperty("fdroid").isPresent) {
     implementation("cz.adaptech:tesseract4android:4.9.0")
   } else {

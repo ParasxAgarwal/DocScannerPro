@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Search
@@ -106,7 +107,8 @@ fun HomeScreen(
     onNavigateToDocuments: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToSettings: () -> Unit,
-    onImportImages: (List<Uri>) -> Unit
+    onImportImages: (List<Uri>) -> Unit,
+    onImportPdfs: (List<Uri>) -> Unit
 ) {
     val documents by viewModel.documents.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -124,6 +126,10 @@ fun HomeScreen(
     val photoPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(maxItems = 30)
     ) { uris -> if (uris.isNotEmpty()) onImportImages(uris) }
+
+    val pdfPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> if (uris.isNotEmpty()) onImportPdfs(uris) }
 
     val visibleDocuments = remember(documents, sortMode) {
         when (sortMode) {
@@ -325,6 +331,10 @@ fun HomeScreen(
                 ToolRow("Import photo", "Use an existing image", Icons.Default.PhotoLibrary) {
                     showToolsSheet = false
                     photoPickerLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+                ToolRow("Import PDF", "Turn PDF pages into editable scans", Icons.Default.PictureAsPdf) {
+                    showToolsSheet = false
+                    pdfPickerLauncher.launch(arrayOf("application/pdf"))
                 }
                 Spacer(Modifier.height(18.dp))
             }

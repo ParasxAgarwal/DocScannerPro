@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -72,14 +73,40 @@ fun ManualCropScreen(
     onBack: () -> Unit,
     onProceedToFilter: () -> Unit
 ) {
-    val pageDraft by viewModel.editingPage.collectAsState()
-    val bitmap = pageDraft?.originalBitmap
-    if (bitmap == null) {
+    val pageDraftValue = viewModel.editingPage.collectAsState().value
+    if (pageDraftValue == null) {
         onBack()
         return
     }
-    var corners by remember { mutableStateOf(pageDraft?.corners ?: QuadCorners.defaultQuad(1f, 1f)) }
+    val pageDraft = pageDraftValue
+    var corners by remember(pageDraft.id) { mutableStateOf(pageDraft.corners) }
     var activeDraggingCorner by remember { mutableStateOf<Int?>(null) }
+    val bitmap = pageDraft.originalBitmap
+    if (bitmap == null) {
+        // Session JPEGs for this page are still decoding in the background.
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Adjust Borders", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color(0xFF0F172A),
+                        titleContentColor = Color.White
+                    )
+                )
+            }
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .background(Color(0xFF020617)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = Color(0xFF38BDF8))
+            }
+        }
+        return
+    }
     Scaffold(
         topBar = {
             TopAppBar(

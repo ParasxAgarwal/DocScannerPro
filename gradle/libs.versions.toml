@@ -30,6 +30,8 @@ robolectric = "4.16.1"
 opencv = "4.14.0"
 zxingCore = "3.5.4"
 tesseract4android = "4.9.0"
+pdfboxAndroid = "2.0.27.0"
+exifinterface = "1.3.7"
 
 
 [libraries]
@@ -70,6 +72,8 @@ robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "
 opencv = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 tesseract4android = { group = "cz.adaptech.tesseract4android", name = "tesseract4android", version.ref = "tesseract4android" }
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfboxAndroid" }
+androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 
 
 [plugins]

@@ -30,6 +30,18 @@ class FileStorageManager(private val context: Context) {
         }
         file.absolutePath
     }
+
+    /**
+     * Moves an already-encoded JPEG (e.g. the scanner-session copy) into a
+     * document folder without re-encoding, preserving quality and time.
+     */
+    suspend fun importJpegFile(docId: String, prefix: String, pageId: String, source: File): String =
+        withContext(Dispatchers.IO) {
+            val folder = getDocumentFolder(docId)
+            val file = File(folder, "${prefix}_${pageId}.jpg")
+            source.inputStream().use { input -> FileOutputStream(file).use { output -> input.copyTo(output) } }
+            file.absolutePath
+        }
     suspend fun saveThumbnail(
         docId: String,
         pageId: String,

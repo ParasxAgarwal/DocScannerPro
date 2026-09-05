@@ -1,6 +1,7 @@
 package com.rebelroot.docscannerpro.ui.viewmodel
 import android.app.Application
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -20,6 +21,7 @@ import com.rebelroot.docscannerpro.core.model.DocumentPage
 import com.rebelroot.docscannerpro.core.model.DocumentType
 import com.rebelroot.docscannerpro.core.model.StructuredReceipt
 import com.rebelroot.docscannerpro.core.ocr.DocumentUnderstanding
+import com.rebelroot.docscannerpro.core.ocr.OcrEngineProvider
 import com.rebelroot.docscannerpro.core.security.VaultManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +49,8 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
     private val pdfExporter = PdfExporter(application)
     private val docxExporter = DocxExporter()
     private val textExporter = TextExporter()
+    private val ocrEngine = OcrEngineProvider.get(application)
+    private val ocrJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     val vaultManager = VaultManager(application)
     val searchQuery = MutableStateFlow("")
     val selectedCategory = MutableStateFlow(CategoryFilter.ALL)
@@ -105,6 +109,61 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
             val pages = repository.getPagesList(docId)
             currentDocument.value = doc
             currentPages.value = pages
+            schedulePendingOcr(docId, doc?.type ?: DocumentType.DOCUMENT, pages)
+        }
+    }
+
+    /**
+     * Pages saved by the scanner start without OCR (saving must be instant).
+     * Recognize the missing text in the background and publish each result as
+     * it lands, so the document opens immediately and text appears shortly after.
+     */
+    private fun schedulePendingOcr(docId: String, docType: DocumentType, pages: List<DocumentPage>) {
+        val pending = pages.filter { it.ocrText.isNullOrBlank() }
+        if (pending.isEmpty()) return
+        ocrJobs.remove(docId)?.cancel()
+        ocrJobs[docId] = viewModelScope.launch {
+            for (page in pending) {
+                val bitmap = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    BitmapFactory.decodeFile(page.processedPath)
+                } ?: continue
+                val result = try {
+                    ocrEngine.recognizeText(bitmap)
+                } catch (_: Throwable) {
+                    bitmap.recycle()
+                    continue
+                }
+                bitmap.recycle()
+                val structuredJson = when (docType) {
+                    DocumentType.RECEIPT -> {
+                        val r = DocumentUnderstanding.extractReceipt(result.fullText)
+                        org.json.JSONObject().apply {
+                            put("merchant", r.merchant)
+                            put("total", r.total)
+                            put("date", r.date)
+                        }.toString()
+                    }
+                    DocumentType.BUSINESS_CARD -> {
+                        val c = DocumentUnderstanding.extractContact(result.fullText)
+                        org.json.JSONObject().apply {
+                            put("name", c.name)
+                            put("company", c.company)
+                            put("phone", c.phone)
+                            put("email", c.email)
+                        }.toString()
+                    }
+                    else -> null
+                }
+                val updated = page.copy(
+                    ocrText = result.fullText,
+                    ocrConfidence = result.confidence,
+                    structuredJson = structuredJson ?: page.structuredJson
+                )
+                repository.updatePage(updated)
+                if (currentDocument.value?.id == docId) {
+                    currentPages.value = currentPages.value.map { if (it.id == page.id) updated else it }
+                }
+            }
         }
     }
     fun updateTitle(docId: String, newTitle: String) {

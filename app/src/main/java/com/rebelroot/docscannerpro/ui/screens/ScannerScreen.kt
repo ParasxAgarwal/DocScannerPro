@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -128,6 +129,9 @@ fun ScannerScreen(
     val analyzedFrameSize by viewModel.analyzedFrameSize.collectAsState()
     val scannerStatus by viewModel.scannerStatus.collectAsState()
     val captureState by viewModel.captureState.collectAsState()
+    val isSaving by viewModel.isSaving.collectAsState()
+    val savingPage by viewModel.savingPage.collectAsState()
+    val savingTotalPages by viewModel.savingTotalPages.collectAsState()
 
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var cameraControl: androidx.camera.core.CameraControl? by remember { mutableStateOf(null) }
@@ -154,22 +158,27 @@ fun ScannerScreen(
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 30)
     ) { uris ->
+        // Decoding/downscaling/EXIF happens inside the ViewModel off the main thread;
+        // a single selection jumps straight into the crop editor.
         if (uris.isNotEmpty()) {
-            val bitmaps = uris.mapNotNull { uri ->
-                try {
-                    val stream = context.contentResolver.openInputStream(uri)
-                    val bitmap = BitmapFactory.decodeStream(stream)
-                    stream?.close()
-                    bitmap
-                } catch (t: Throwable) {
-                    Log.e("ScannerScreen", "Import of $uri failed", t)
-                    null
+            viewModel.importImages(uris) { drafts ->
+                if (drafts.size == 1) {
+                    viewModel.editPage(drafts.first())
+                    onNavigateToCrop()
                 }
             }
-            if (bitmaps.isEmpty()) {
-                viewModel.setCaptureFailed("Could not read the selected images")
-            } else {
-                viewModel.importImages(bitmaps)
+        }
+    }
+
+    val pdfPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.importPdfs(uris) { drafts ->
+                if (drafts.size == 1) {
+                    viewModel.editPage(drafts.first())
+                    onNavigateToCrop()
+                }
             }
         }
     }
@@ -381,6 +390,39 @@ fun ScannerScreen(
             else -> Unit
         }
 
+        if (isSaving) {
+            // Blocking overlay while the session is written out — Done used to
+            // look frozen because OCR ran before the navigation happened.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color(0xFF0F172A).copy(alpha = 0.96f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 22.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(34.dp))
+                        Spacer(Modifier.height(12.dp))
+                        Text("Saving document…", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        if (savingTotalPages > 0) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Page ${savingPage.coerceAtLeast(1)} of $savingTotalPages",
+                                color = Color.White.copy(alpha = 0.75f),
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -470,6 +512,14 @@ fun ScannerScreen(
                         )
                     },
                     testTag = "btn_gallery_import"
+                )
+                ScannerUtilityButton(
+                    icon = Icons.Default.PictureAsPdf,
+                    label = "PDF",
+                    onClick = {
+                        pdfPicker.launch(arrayOf("application/pdf"))
+                    },
+                    testTag = "btn_pdf_import"
                 )
                 if (scanMode != ScanMode.QR_BARCODE) {
                     val canCapture = scannerStatus == ScannerStatus.Ready &&
@@ -651,12 +701,14 @@ private fun PageThumbnailStrip(
                         )
                     }
             ) {
-                androidx.compose.foundation.Image(
-                    bitmap = thumb.asImageBitmap(),
-                    contentDescription = "Captured page ${pages.indexOf(page) + 1}. Tap to crop, long-press to remove.",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                if (thumb != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = thumb.asImageBitmap(),
+                        contentDescription = "Captured page ${pages.indexOf(page) + 1}. Tap to crop, long-press to remove.",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
     }

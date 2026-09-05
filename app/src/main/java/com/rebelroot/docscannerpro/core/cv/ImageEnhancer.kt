@@ -70,7 +70,38 @@ object ImageEnhancer {
         canvas.drawBitmap(bitmap, 0f, 0f, paint)
         return result
     }
+    /**
+     * True B&W document mode: OpenCV adaptive (Gaussian) threshold so shadows and
+     * uneven lighting don't collapse the page to all-dark or all-white, unlike a
+     * single global threshold.
+     */
     fun convertToDocumentBw(bitmap: Bitmap): Bitmap {
+        return try {
+            val src = org.opencv.core.Mat()
+            org.opencv.android.Utils.bitmapToMat(bitmap, src)
+            val gray = org.opencv.core.Mat()
+            org.opencv.imgproc.Imgproc.cvtColor(src, gray, org.opencv.imgproc.Imgproc.COLOR_RGBA2GRAY)
+            src.release()
+            org.opencv.imgproc.Imgproc.medianBlur(gray, gray, 3)
+            val bw = org.opencv.core.Mat()
+            org.opencv.imgproc.Imgproc.adaptiveThreshold(
+                gray, bw, 255.0,
+                org.opencv.imgproc.Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                org.opencv.imgproc.Imgproc.THRESH_BINARY,
+                35, 13.0
+            )
+            gray.release()
+            val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            org.opencv.android.Utils.matToBitmap(bw, result)
+            bw.release()
+            result
+        } catch (t: Throwable) {
+            android.util.Log.w("ImageEnhancer", "Adaptive B&W failed, using legacy threshold", t)
+            legacyConvertToDocumentBw(bitmap)
+        }
+    }
+
+    private fun legacyConvertToDocumentBw(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         val pixels = IntArray(width * height)

@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rebelroot.docscannerpro.core.model.FilterType
+import com.rebelroot.docscannerpro.ui.viewmodel.CaptureState
 import com.rebelroot.docscannerpro.ui.viewmodel.ScanViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +69,7 @@ fun FilterAndEditScreen(
 ) {
     val pageDraft by viewModel.editingPage.collectAsState()
     val isProcessing by viewModel.isProcessing.collectAsState()
+    val captureState by viewModel.captureState.collectAsState()
     val activeFilter = pageDraft?.filterType ?: FilterType.AUTO_ENHANCE
     val filters = listOf(
         FilterType.AUTO_ENHANCE to "Auto",
@@ -122,7 +124,7 @@ fun FilterAndEditScreen(
                                 color = if (isSelected) Color(0xFF0284C7) else Color.White.copy(alpha = 0.12f),
                                 border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)) else null,
                                 modifier = Modifier
-                                    .clickable { viewModel.applyFilterToEditingPage(type) }
+                                    .clickable(enabled = !isProcessing) { viewModel.applyFilterToEditingPage(type) }
                                     .testTag("filter_chip_${type.name}")
                             ) {
                                 Row(
@@ -167,7 +169,7 @@ fun FilterAndEditScreen(
                             if (isProcessing) {
                                 CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Processing & OCR...")
+                                Text("Saving…")
                             } else {
                                 Icon(Icons.Default.Save, contentDescription = null)
                                 Spacer(modifier = Modifier.width(8.dp))
@@ -199,6 +201,33 @@ fun FilterAndEditScreen(
                 )
             } else {
                 CircularProgressIndicator(color = Color.White)
+            }
+            when (val state = captureState) {
+                is CaptureState.Failed -> Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF7F1D1D).copy(alpha = 0.94f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp)
+                        .fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = state.message,
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = { viewModel.dismissCaptureFailure() }) {
+                            Text("OK")
+                        }
+                    }
+                }
+                else -> Unit
             }
         }
     }

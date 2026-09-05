@@ -1,8 +1,6 @@
 package com.rebelroot.docscannerpro.ui.navigation
 import android.Manifest
-import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,6 +42,7 @@ import com.rebelroot.docscannerpro.ui.screens.FilterAndEditScreen
 import com.rebelroot.docscannerpro.ui.screens.HomeScreen
 import com.rebelroot.docscannerpro.ui.screens.ManualCropScreen
 import com.rebelroot.docscannerpro.ui.screens.NotesScreen
+import com.rebelroot.docscannerpro.ui.screens.PdfToolScreen
 import com.rebelroot.docscannerpro.ui.screens.ToolsScreen
 import com.rebelroot.docscannerpro.ui.screens.OcrEditorScreen
 import com.rebelroot.docscannerpro.ui.screens.ScannerScreen
@@ -68,12 +67,16 @@ sealed class Screen(val route: String) {
         fun createRoute(docId: String? = null) = if (docId != null) "notes?docId=$docId" else "notes"
     }
     data object Tools : Screen("tools")
+    data object PdfTool : Screen("pdf_tool/{tool}") {
+        fun createRoute(tool: com.rebelroot.docscannerpro.ui.viewmodel.PdfToolType) = "pdf_tool/${tool.name}"
+    }
     data object Settings : Screen("settings")
 }
 @Composable
 fun AppNavigation(
     documentViewModel: DocumentViewModel = viewModel(),
     scanViewModel: ScanViewModel = viewModel(),
+    pdfToolsViewModel: com.rebelroot.docscannerpro.ui.viewmodel.PdfToolsViewModel = viewModel(),
     quickMode: ScanMode? = null,
     onQuickModeConsumed: () -> Unit = {}
 ) {
@@ -112,34 +115,29 @@ fun AppNavigation(
     }
     fun importImages(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        val bitmaps = uris.mapNotNull { uri ->
-            try {
-                val stream = context.contentResolver.openInputStream(uri)
-                val bitmap = BitmapFactory.decodeStream(stream)
-                stream?.close()
-                bitmap
-            } catch (t: Exception) {
-                scanViewModel.setCaptureFailed("Import failed: ${t.message ?: "unknown error"}")
-                null
+        // Switch mode and enter the scanner FIRST: setScanMode() resets the
+        // processing state, so it must run before the import coroutine starts.
+        // The scanner gives visible progress and error banners during import.
+        scanViewModel.setScanMode(ScanMode.DOCUMENT)
+        navController.navigate(Screen.Scanner.createRoute(ScanMode.DOCUMENT))
+        scanViewModel.importImages(uris) { drafts ->
+            if (drafts.size == 1) {
+                // Single image behaves like a captured page: open the crop editor.
+                scanViewModel.editPage(drafts.first())
+                navController.navigate(Screen.ManualCrop.route)
             }
         }
-        if (bitmaps.isEmpty()) {
-            scanViewModel.setCaptureFailed("Could not read the selected images")
-            return
-        }
-        if (bitmaps.size == 1) {
-            // Single image: go straight to the crop editor like before.
-            scanViewModel.captureFrame(
-                bitmaps.first(),
-                com.rebelroot.docscannerpro.core.model.QuadCorners.defaultQuad(1f, 1f),
-                treatAsUndetected = true
-            )
-            navController.navigate(Screen.ManualCrop.route)
-        } else {
-            // Batch: all images become pages of one session; review and save
-            // from the scanner screen (thumbnail strip + Done -> PDF).
-            scanViewModel.importImages(bitmaps)
-            startScanning(ScanMode.DOCUMENT)
+    }
+
+    fun importPdfs(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        scanViewModel.setScanMode(ScanMode.DOCUMENT)
+        navController.navigate(Screen.Scanner.createRoute(ScanMode.DOCUMENT))
+        scanViewModel.importPdfs(uris) { drafts ->
+            if (drafts.size == 1) {
+                scanViewModel.editPage(drafts.first())
+                navController.navigate(Screen.ManualCrop.route)
+            }
         }
     }
     NavHost(
@@ -155,7 +153,8 @@ fun AppNavigation(
                 onNavigateToTools = { navController.navigate(Screen.Tools.route) },
                 onNavigateToFavorites = { documentViewModel.setCategory(com.rebelroot.docscannerpro.ui.viewmodel.CategoryFilter.FAVORITES) },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
-                onImportImages = { uris -> importImages(uris) }
+                onImportImages = { uris -> importImages(uris) },
+                onImportPdfs = { uris -> importPdfs(uris) }
             )
         }
         composable(
@@ -244,7 +243,26 @@ fun AppNavigation(
         composable(Screen.Tools.route) {
             ToolsScreen(
                 onBack = { navController.popBackStack() },
-                onScan = { mode -> startScanning(mode) }
+                onScan = { mode -> startScanning(mode) },
+                onOpenPdfTool = { tool ->
+                    navController.navigate(Screen.PdfTool.createRoute(tool))
+                }
+            )
+        }
+        composable(
+            route = Screen.PdfTool.route,
+            arguments = listOf(navArgument("tool") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val toolName = backStackEntry.arguments?.getString("tool") ?: ""
+            val tool = try {
+                com.rebelroot.docscannerpro.ui.viewmodel.PdfToolType.valueOf(toolName)
+            } catch (_: Exception) {
+                com.rebelroot.docscannerpro.ui.viewmodel.PdfToolType.MERGE
+            }
+            PdfToolScreen(
+                tool = tool,
+                viewModel = pdfToolsViewModel,
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Screen.Settings.route) {
@@ -284,7 +302,7 @@ fun CameraPermissionRationale(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Doc Scanner uses your camera to capture and detect paper documents, receipts, and ID cards completely offline on your device.",
+                    text = "Doc Scanner Pro uses your camera to capture and detect paper documents, receipts, and ID cards completely offline on your device.",
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.outline

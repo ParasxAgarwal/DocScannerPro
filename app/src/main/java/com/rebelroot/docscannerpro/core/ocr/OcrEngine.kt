@@ -1,4 +1,5 @@
 package com.rebelroot.docscannerpro.core.ocr
+import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import com.googlecode.tesseract.android.TessBaseAPI
@@ -11,6 +12,22 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+
+/**
+ * App-wide shared [OcrEngine]. Tesseract's LSTM model is memory-hungry, so Scan
+ * and Document features must not each spin up their own instance. Never closed
+ * per-screen; the process teardown reclaims it.
+ */
+object OcrEngineProvider {
+    @Volatile
+    private var instance: OcrEngine? = null
+
+    fun get(application: Application): OcrEngine =
+        instance ?: synchronized(this) {
+            instance ?: OcrEngine(application).also { instance = it }
+        }
+}
+
 class OcrEngine(private val context: Context) {
     private val dataDirectory = File(context.filesDir, "tesseract")
     private var initializedLanguage: String? = null

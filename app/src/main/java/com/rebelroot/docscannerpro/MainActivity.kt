@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         check(OpenCVLoader.initLocal()) { "OpenCV failed to initialize" }
+        com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(applicationContext)
         consumeQuickMode(intent)
         maybeShowQuickAccessNotification()
         setContent {

@@ -1,8 +1,14 @@
 package com.rebelroot.docscannerpro.ui.viewmodel
 
 import android.app.Application
+import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rebelroot.docscannerpro.core.cv.DocumentDetector
@@ -21,7 +27,6 @@ import com.rebelroot.docscannerpro.core.model.FilterType
 import com.rebelroot.docscannerpro.core.model.QuadCorners
 import com.rebelroot.docscannerpro.core.ocr.BarcodeEngine
 import com.rebelroot.docscannerpro.core.ocr.DocumentUnderstanding
-import com.rebelroot.docscannerpro.core.ocr.OcrEngine
 import com.rebelroot.docscannerpro.core.qr.QrContent
 import com.rebelroot.docscannerpro.core.qr.QrHistoryStore
 import kotlinx.coroutines.Dispatchers
@@ -71,25 +76,34 @@ data class QrResult(
     val timestamp: Long
 )
 
+/**
+ * An unsaved page in the scanner session. Immutable: edits produce a new
+ * instance via [copy] so StateFlow consumers always observe the change.
+ *
+ * The full-size bitmaps are transient caches. The source of truth is the
+ * session JPEG pair ([sessionOrigPath]/[sessionProcPath]); both are evicted
+ * from memory right after persist so multi-page sessions (imports of dozens
+ * of photos) stay within the heap budget. Bitmaps are reloaded on demand by
+ * [ScanViewModel.editPage] / save.
+ */
 data class ScannedPageDraft(
     val id: String = UUID.randomUUID().toString(),
-    var originalBitmap: Bitmap,
-    var processedBitmap: Bitmap,
-    var thumbnail: Bitmap? = null,
-    var corners: QuadCorners,
-    var filterType: FilterType = FilterType.AUTO_ENHANCE,
-    var rotation: Int = 0,
-    var ocrText: String? = null,
-    var ocrConfidence: Float = 0f,
-    var sessionOrigPath: String? = null,
-    var sessionProcPath: String? = null
+    val originalBitmap: Bitmap? = null,
+    val processedBitmap: Bitmap? = null,
+    val thumbnail: Bitmap? = null,
+    val corners: QuadCorners,
+    val filterType: FilterType = FilterType.AUTO_ENHANCE,
+    val rotation: Int = 0,
+    val ocrText: String? = null,
+    val ocrConfidence: Float = 0f,
+    val sessionOrigPath: String? = null,
+    val sessionProcPath: String? = null
 )
 
 class ScanViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = DocumentRepository(AppDatabase.getInstance(application))
     private val storageManager = FileStorageManager(application)
     private val detector = DocumentDetector()
-    private val ocrEngine = OcrEngine(application)
     private val barcodeEngine = BarcodeEngine()
     private val bookScanner = BookScanner()
     private val qrHistoryStore = QrHistoryStore(application)
@@ -123,6 +137,11 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     val capturedPages = MutableStateFlow<List<ScannedPageDraft>>(emptyList())
     val editingPage = MutableStateFlow<ScannedPageDraft?>(null)
     val isProcessing = MutableStateFlow(false)
+
+    /** Fast-save progress: surfaced as a blocking overlay while document files are written. */
+    val isSaving = MutableStateFlow(false)
+    val savingPage = MutableStateFlow(0)
+    val savingTotalPages = MutableStateFlow(0)
 
     val qrHistory = qrHistoryStore.entries
 
@@ -277,22 +296,25 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                     isProcessing.value = false
                     return@launch
                 }
+                // Cap resolution: camera sensors emit 12-200 MP; beyond ~2560 px it is
+                // wasted on PDF export, slows down every transform, and multiplies OOM risk.
+                val frame = downscaleTo(copy, MAX_PAGE_DIM)
                 if (scanMode.value == ScanMode.BOOK) {
-                    handleBookCapture(copy)
+                    handleBookCapture(frame)
                     return@launch
                 }
                 if (scanMode.value == ScanMode.PHOTO) {
                     // Photo mode: keep the frame exactly as captured — no crop,
                     // no warp, no document enhancement.
                     val draft = ScannedPageDraft(
-                        originalBitmap = copy,
-                        processedBitmap = copy,
-                        thumbnail = scaleForThumbnail(copy),
+                        originalBitmap = frame,
+                        processedBitmap = frame,
+                        thumbnail = scaleForThumbnail(frame),
                         corners = QuadCorners.defaultQuad(1f, 1f)
                     )
-                    persistDraft(draft)
+                    val persisted = persistDraft(draft)
                     withContext(Dispatchers.Main) {
-                        capturedPages.value = capturedPages.value + draft
+                        capturedPages.value = capturedPages.value + persisted
                         guidanceMessage.value = "Photo added • keep going or tap Done"
                         captureState.value = CaptureState.Idle
                         isProcessing.value = false
@@ -302,13 +324,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                 val detected = hasRealDetection.value && !treatAsUndetected
                 val corners = manualCorners ?: detectedCorners.value
                 val draft = if (detected) {
-                    val pixelCorners = QuadCorners(
-                        android.graphics.PointF(corners.topLeft.x * copy.width, corners.topLeft.y * copy.height),
-                        android.graphics.PointF(corners.topRight.x * copy.width, corners.topRight.y * copy.height),
-                        android.graphics.PointF(corners.bottomRight.x * copy.width, corners.bottomRight.y * copy.height),
-                        android.graphics.PointF(corners.bottomLeft.x * copy.width, corners.bottomLeft.y * copy.height)
-                    )
-                    val warped = PerspectiveTransformer.transform(copy, pixelCorners)
+                    val warped = PerspectiveTransformer.transform(frame, toPixelCorners(corners, frame))
                     val enhanced = ImageEnhancer.enhanceColorAndContrast(warped)
                     ScannedPageDraft(
                         originalBitmap = warped,
@@ -318,17 +334,17 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 } else {
                     // Manual capture fallback: keep the full frame and let the user crop.
-                    val enhanced = ImageEnhancer.enhanceColorAndContrast(copy)
+                    val enhanced = ImageEnhancer.enhanceColorAndContrast(frame)
                     ScannedPageDraft(
-                        originalBitmap = copy,
+                        originalBitmap = frame,
                         processedBitmap = enhanced,
                         thumbnail = scaleForThumbnail(enhanced),
                         corners = QuadCorners.defaultQuad(1f, 1f)
                     )
                 }
-                persistDraft(draft)
+                val persisted = persistDraft(draft)
                 withContext(Dispatchers.Main) {
-                    capturedPages.value = capturedPages.value + draft
+                    capturedPages.value = capturedPages.value + persisted
                     if (scanMode.value == ScanMode.ID_CARD && idCardSide.value == IdCardSide.FRONT) {
                         idCardSide.value = IdCardSide.BACK
                         guidanceMessage.value = "Now flip and scan ID Back"
@@ -344,110 +360,179 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                     captureState.value = CaptureState.Failed("Capture failed. Try again.")
                     isProcessing.value = false
                 }
-                android.util.Log.e("ScanViewModel", "Capture processing failed", t)
+                Log.e("ScanViewModel", "Capture processing failed", t)
             }
         }
     }
 
-    private suspend fun handleBookCapture(copy: Bitmap) {
+    private suspend fun handleBookCapture(frame: Bitmap) {
         val corners = detectedCorners.value
-        val bookPages = bookScanner.processSpread(copy, corners)
+        val bookPages = bookScanner.processSpread(frame, corners)
         val drafts = bookPages.map { page ->
             val enhanced = ImageEnhancer.enhanceColorAndContrast(page, contrast = 1.12f, brightness = 8f)
-            ScannedPageDraft(
-                originalBitmap = page,
-                processedBitmap = enhanced,
-                thumbnail = scaleForThumbnail(enhanced),
-                corners = QuadCorners.defaultQuad(1f, 1f, 0.01f)
+            persistDraft(
+                ScannedPageDraft(
+                    originalBitmap = page,
+                    processedBitmap = enhanced,
+                    thumbnail = scaleForThumbnail(enhanced),
+                    corners = QuadCorners.defaultQuad(1f, 1f, 0.01f)
+                )
             )
         }
-        drafts.forEach { persistDraft(it) }
         withContext(Dispatchers.Main) {
             capturedPages.value = capturedPages.value + drafts
             editingPage.value = null
             detector.reset()
-            lastCapturedFingerprint = fingerprintOf(copy)
+            lastCapturedFingerprint = fingerprintOf(frame)
             guidanceMessage.value = "Spread captured • turn the page"
             captureState.value = CaptureState.Idle
             isProcessing.value = false
         }
     }
 
-    /** Opens a captured page for manual crop/rotation without leaving the session. */
+    /**
+     * Opens a captured page for manual crop/rotation without leaving the session.
+     * The draft is published immediately (screens show a loading state) and its
+     * full-size bitmaps are reloaded from the session files in the background.
+     */
     fun editPage(draft: ScannedPageDraft) {
+        if (isProcessing.value) return
         editingPage.value = draft
+        isProcessing.value = true
+        viewModelScope.launch(Dispatchers.Default) {
+            val loaded = withBitmaps(draft)
+            withContext(Dispatchers.Main) {
+                // Ignore the result if the user moved on to another page meanwhile.
+                if (editingPage.value?.id == draft.id) {
+                    editingPage.value = loaded
+                }
+                isProcessing.value = false
+            }
+        }
     }
 
     fun retakePage(draft: ScannedPageDraft) {
         capturedPages.value = capturedPages.value.filterNot { it.id == draft.id }
+        if (editingPage.value?.id == draft.id) editingPage.value = null
         draft.sessionOrigPath?.let { File(it).delete() }
         draft.sessionProcPath?.let { File(it).delete() }
     }
 
     /**
-     * Batch import: turns a list of gallery images into pages of the current
-     * session. Each page keeps its full frame (user can crop per page from the
-     * thumbnail strip) and gets standard document enhancement.
+     * Batch import: turns gallery images (or PDF pages) into pages of the current
+     * session. Decoding happens off the main thread with downsampling and EXIF
+     * correction; pages appear one by one with progress feedback.
      */
-    fun importImages(bitmaps: List<Bitmap>) {
-        if (bitmaps.isEmpty()) return
+    fun importImages(uris: List<Uri>, onReady: (List<ScannedPageDraft>) -> Unit = {}) {
+        importUrisInternal(uris, onReady, ::decodeImageUri)
+    }
+
+    fun importPdfs(uris: List<Uri>, onReady: (List<ScannedPageDraft>) -> Unit = {}) {
+        importUrisInternal(uris, onReady, ::decodePdfUri)
+    }
+
+    private fun importUrisInternal(
+        uris: List<Uri>,
+        onReady: (List<ScannedPageDraft>) -> Unit,
+        decode: (Uri) -> List<Bitmap>
+    ) {
+        if (uris.isEmpty()) return
+        if (scanMode.value == ScanMode.QR_BARCODE) {
+            // Importing makes no sense in the QR session — pages would be invisible.
+            scanMode.value = ScanMode.DOCUMENT
+        }
         captureState.value = CaptureState.Processing
         isProcessing.value = true
         viewModelScope.launch(Dispatchers.Default) {
+            val drafts = mutableListOf<ScannedPageDraft>()
+            var failedFiles = 0
             try {
-                val drafts = bitmaps.mapNotNull { bmp ->
-                    try {
-                        val copy = bmp.copy(Bitmap.Config.ARGB_8888, false) ?: return@mapNotNull null
-                        val enhanced = ImageEnhancer.enhanceColorAndContrast(copy)
-                        ScannedPageDraft(
-                            originalBitmap = copy,
-                            processedBitmap = enhanced,
-                            thumbnail = scaleForThumbnail(enhanced),
-                            corners = QuadCorners.defaultQuad(1f, 1f)
-                        ).also { persistDraft(it) }
+                for (uri in uris) {
+                    val bitmaps = try {
+                        decode(uri)
                     } catch (t: Throwable) {
-                        android.util.Log.e("ScanViewModel", "Failed to import an image", t)
-                        null
+                        Log.e("ScanViewModel", "Import of $uri failed", t)
+                        emptyList()
+                    }
+                    if (bitmaps.isEmpty()) {
+                        failedFiles++
+                        continue
+                    }
+                    for (bitmap in bitmaps) {
+                        val draft = buildImportDraft(bitmap) ?: run {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                            failedFiles++
+                            continue
+                        }
+                        val persisted = persistDraft(draft)
+                        drafts += persisted
+                        withContext(Dispatchers.Main) {
+                            capturedPages.value = capturedPages.value + persisted
+                            guidanceMessage.value = "Importing… ${drafts.size} page(s) added"
+                        }
                     }
                 }
                 withContext(Dispatchers.Main) {
-                    capturedPages.value = capturedPages.value + drafts
-                    guidanceMessage.value = "${drafts.size} photo(s) imported • tap Done to save"
                     captureState.value = CaptureState.Idle
                     isProcessing.value = false
+                    guidanceMessage.value = buildString {
+                        append("${drafts.size} page(s) imported • tap Done to save")
+                        if (failedFiles > 0) append(" • $failedFiles file(s) could not be read")
+                    }
+                    onReady(drafts)
                 }
             } catch (t: Throwable) {
-                android.util.Log.e("ScanViewModel", "Batch import failed", t)
+                Log.e("ScanViewModel", "Batch import failed", t)
                 withContext(Dispatchers.Main) {
-                    captureState.value = CaptureState.Failed("Import failed. Try again.")
                     isProcessing.value = false
+                    captureState.value = CaptureState.Failed("Import failed. Try again.")
                 }
             }
         }
     }
 
+    private fun buildImportDraft(source: Bitmap): ScannedPageDraft? {
+        return try {
+            val scaled = downscaleTo(source, MAX_PAGE_DIM)
+            val enhanced = ImageEnhancer.enhanceColorAndContrast(scaled)
+            ScannedPageDraft(
+                originalBitmap = scaled,
+                processedBitmap = enhanced,
+                thumbnail = scaleForThumbnail(enhanced),
+                corners = QuadCorners.defaultQuad(1f, 1f)
+            )
+        } catch (t: Throwable) {
+            Log.e("ScanViewModel", "Failed to import an image", t)
+            null
+        }
+    }
+
     fun updateEditingPageCorners(newCorners: QuadCorners) {
         val current = editingPage.value ?: return
+        val source = current.originalBitmap ?: return
+        if (isProcessing.value) return
+        isProcessing.value = true
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                val copy = current.originalBitmap
-                val pixelCorners = QuadCorners(
-                    android.graphics.PointF(newCorners.topLeft.x * copy.width, newCorners.topLeft.y * copy.height),
-                    android.graphics.PointF(newCorners.topRight.x * copy.width, newCorners.topRight.y * copy.height),
-                    android.graphics.PointF(newCorners.bottomRight.x * copy.width, newCorners.bottomRight.y * copy.height),
-                    android.graphics.PointF(newCorners.bottomLeft.x * copy.width, newCorners.bottomLeft.y * copy.height)
+                val warped = PerspectiveTransformer.transform(source, toPixelCorners(newCorners, source))
+                val filtered = ImageEnhancer.applyFilter(warped, current.filterType)
+                if (filtered !== warped) warped.recycle()
+                val updated = persistProcessed(
+                    current.copy(
+                        corners = newCorners,
+                        processedBitmap = filtered,
+                        thumbnail = scaleForThumbnail(filtered)
+                    )
                 )
-                val warped = PerspectiveTransformer.transform(copy, pixelCorners)
-                val enhanced = ImageEnhancer.applyFilter(warped, current.filterType)
-                current.corners = newCorners
-                current.processedBitmap = enhanced
-                current.thumbnail = scaleForThumbnail(enhanced)
                 withContext(Dispatchers.Main) {
-                    editingPage.value = current
-                    capturedPages.value = capturedPages.value.map { if (it.id == current.id) current else it }
+                    editingPage.value = updated
+                    capturedPages.value = capturedPages.value.map { if (it.id == updated.id) updated else it }
+                    isProcessing.value = false
                 }
             } catch (t: Throwable) {
+                Log.e("ScanViewModel", "Crop update failed", t)
                 withContext(Dispatchers.Main) {
+                    isProcessing.value = false
                     captureState.value = CaptureState.Failed("Could not update crop: ${t.message ?: "unexpected error"}")
                 }
             }
@@ -456,28 +541,31 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     fun applyFilterToEditingPage(filterType: FilterType) {
         val current = editingPage.value ?: return
+        val source = current.originalBitmap ?: return
+        if (isProcessing.value) return
+        isProcessing.value = true
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                val copy = current.originalBitmap
-                val corners = current.corners
-                val pixelCorners = QuadCorners(
-                    android.graphics.PointF(corners.topLeft.x * copy.width, corners.topLeft.y * copy.height),
-                    android.graphics.PointF(corners.topRight.x * copy.width, corners.topRight.y * copy.height),
-                    android.graphics.PointF(corners.bottomRight.x * copy.width, corners.bottomRight.y * copy.height),
-                    android.graphics.PointF(corners.bottomLeft.x * copy.width, corners.bottomLeft.y * copy.height)
-                )
-                val warped = PerspectiveTransformer.transform(copy, pixelCorners)
+                val warped = PerspectiveTransformer.transform(source, toPixelCorners(current.corners, source))
                 val filtered = ImageEnhancer.applyFilter(warped, filterType)
+                if (filtered !== warped) warped.recycle()
                 val rotated = if (current.rotation != 0) PerspectiveTransformer.rotate(filtered, current.rotation) else filtered
-                current.filterType = filterType
-                current.processedBitmap = rotated
-                current.thumbnail = scaleForThumbnail(rotated)
+                val updated = persistProcessed(
+                    current.copy(
+                        filterType = filterType,
+                        processedBitmap = rotated,
+                        thumbnail = scaleForThumbnail(rotated)
+                    )
+                )
                 withContext(Dispatchers.Main) {
-                    editingPage.value = current
-                    capturedPages.value = capturedPages.value.map { if (it.id == current.id) current else it }
+                    editingPage.value = updated
+                    capturedPages.value = capturedPages.value.map { if (it.id == updated.id) updated else it }
+                    isProcessing.value = false
                 }
             } catch (t: Throwable) {
+                Log.e("ScanViewModel", "Filter update failed", t)
                 withContext(Dispatchers.Main) {
+                    isProcessing.value = false
                     captureState.value = CaptureState.Failed("Could not apply filter: ${t.message ?: "unexpected error"}")
                 }
             }
@@ -486,30 +574,66 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rotateEditingPage() {
         val current = editingPage.value ?: return
-        val newRot = (current.rotation + 90) % 360
-        current.rotation = newRot
-        current.processedBitmap = PerspectiveTransformer.rotate(current.processedBitmap, 90)
-        editingPage.value = current
+        if (isProcessing.value) return
+        isProcessing.value = true
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val source = current.processedBitmap
+                    ?: current.sessionProcPath?.let { BitmapFactory.decodeFile(it) }
+                    ?: throw IllegalStateException("Page bitmap unavailable")
+                val rotated = PerspectiveTransformer.rotate(source, 90)
+                val updated = persistProcessed(
+                    current.copy(
+                        rotation = (current.rotation + 90) % 360,
+                        processedBitmap = rotated,
+                        thumbnail = scaleForThumbnail(rotated)
+                    )
+                )
+                withContext(Dispatchers.Main) {
+                    editingPage.value = updated
+                    capturedPages.value = capturedPages.value.map { if (it.id == updated.id) updated else it }
+                    isProcessing.value = false
+                }
+            } catch (t: Throwable) {
+                Log.e("ScanViewModel", "Rotate failed", t)
+                withContext(Dispatchers.Main) {
+                    isProcessing.value = false
+                    captureState.value = CaptureState.Failed("Could not rotate page: ${t.message ?: "unexpected error"}")
+                }
+            }
+        }
     }
 
+    /**
+     * Saves the session quickly: writes page files, inserts the document and
+     * navigates on. OCR runs afterwards in the background (DocumentViewModel)
+     * so "Done" no longer blocks for seconds on Tesseract.
+     */
     fun finishBatchAndSave(
         customTitle: String? = null,
         onSaved: (documentId: String) -> Unit
     ) {
         val drafts = capturedPages.value
         if (drafts.isEmpty()) return
+        if (isSaving.value) return
+        isSaving.value = true
+        savingTotalPages.value = drafts.size
+        savingPage.value = 0
         isProcessing.value = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val docId = saveDrafts(drafts, customTitle)
                 withContext(Dispatchers.Main) {
+                    isSaving.value = false
                     isProcessing.value = false
                     capturedPages.value = emptyList()
                     editingPage.value = null
                     onSaved(docId)
                 }
             } catch (t: Throwable) {
+                Log.e("ScanViewModel", "Save failed", t)
                 withContext(Dispatchers.Main) {
+                    isSaving.value = false
                     isProcessing.value = false
                     captureState.value = CaptureState.Failed("Could not save document: ${t.message ?: "unexpected error"}")
                 }
@@ -527,54 +651,38 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             ScanMode.BOOK -> DocumentType.BOOK
             else -> DocumentType.DOCUMENT
         }
-        var firstOcrText: String? = null
         val savedPages = mutableListOf<DocumentPage>()
         for ((index, draft) in drafts.withIndex()) {
-            val origPath = storageManager.saveBitmap(docId, "orig", draft.id, draft.originalBitmap)
-            val procPath = storageManager.saveBitmap(docId, "proc", draft.id, draft.processedBitmap)
-            val thumbPath = storageManager.saveThumbnail(docId, draft.id, draft.processedBitmap)
-            val ocrResult = ocrEngine.recognizeText(draft.processedBitmap)
-            if (index == 0) firstOcrText = ocrResult.fullText
-            val structuredJson = when (docType) {
-                DocumentType.RECEIPT -> {
-                    val r = DocumentUnderstanding.extractReceipt(ocrResult.fullText)
-                    org.json.JSONObject().apply {
-                        put("merchant", r.merchant)
-                        put("total", r.total)
-                        put("date", r.date)
-                    }.toString()
-                }
-                DocumentType.BUSINESS_CARD -> {
-                    val c = DocumentUnderstanding.extractContact(ocrResult.fullText)
-                    org.json.JSONObject().apply {
-                        put("name", c.name)
-                        put("company", c.company)
-                        put("phone", c.phone)
-                        put("email", c.email)
-                    }.toString()
-                }
-                else -> null
-            }
+            savingPage.value = index + 1
+            val origPath = draft.sessionOrigPath?.let { storageManager.importJpegFile(docId, "orig", draft.id, File(it)) }
+                ?: draft.originalBitmap?.let { storageManager.saveBitmap(docId, "orig", draft.id, it) }
+            val procPath = draft.sessionProcPath?.let { storageManager.importJpegFile(docId, "proc", draft.id, File(it)) }
+                ?: draft.processedBitmap?.let { storageManager.saveBitmap(docId, "proc", draft.id, it) }
+            if (procPath == null) continue
+            val thumbnailSource = decodeScaled(procPath, 320)
+            val thumbPath = thumbnailSource?.let { storageManager.saveThumbnail(docId, draft.id, it) }
+            thumbnailSource?.recycle()
+            val (width, height) = decodeImageSize(procPath)
             savedPages.add(
                 DocumentPage(
                     id = draft.id,
                     documentId = docId,
                     pageIndex = index,
-                    originalPath = origPath,
+                    originalPath = origPath ?: procPath,
                     processedPath = procPath,
-                    thumbnailPath = thumbPath,
+                    thumbnailPath = thumbPath ?: procPath,
                     rotation = draft.rotation,
                     filterType = draft.filterType,
-                    ocrText = ocrResult.fullText,
-                    ocrConfidence = ocrResult.confidence,
-                    width = draft.processedBitmap.width,
-                    height = draft.processedBitmap.height,
-                    structuredJson = structuredJson
+                    ocrText = null,
+                    ocrConfidence = 0f,
+                    width = width,
+                    height = height
                 )
             )
         }
+        if (savedPages.isEmpty()) throw IllegalStateException("No pages could be saved")
         val title = customTitle?.takeIf { it.isNotBlank() }
-            ?: DocumentUnderstanding.suggestFilename(docType, firstOcrText).replace(".pdf", "")
+            ?: DocumentUnderstanding.suggestFilename(docType)
         val document = Document(
             id = docId,
             title = title,
@@ -591,6 +699,146 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissScannedBarcode() {
         scannedBarcode.value = null
     }
+
+    // region Draft helpers
+
+    /** Returns a copy of [draft] with original/processed bitmaps reloaded from session files. */
+    private suspend fun withBitmaps(draft: ScannedPageDraft): ScannedPageDraft = withContext(Dispatchers.Default) {
+        val orig = draft.originalBitmap
+            ?: draft.sessionOrigPath?.let { BitmapFactory.decodeFile(it) }
+        val proc = draft.processedBitmap
+            ?: draft.sessionProcPath?.let { BitmapFactory.decodeFile(it) }
+            ?: orig
+        draft.copy(originalBitmap = orig, processedBitmap = proc)
+    }
+
+    /**
+     * Writes the session JPEG pair for [draft] and, on success, returns a copy
+     * holding only the file paths — the full-size bitmaps are released so long
+     * sessions stay within the heap budget. On write failure the bitmaps are
+     * kept in RAM as the fallback source.
+     */
+    private fun persistDraft(draft: ScannedPageDraft): ScannedPageDraft {
+        val persisted = runCatching {
+            sessionDirectory.mkdirs()
+            val origBitmap = draft.originalBitmap
+                ?: draft.processedBitmap
+                ?: throw IllegalStateException("Draft has neither bitmaps nor files")
+            val procBitmap = draft.processedBitmap ?: origBitmap
+            val orig = File(sessionDirectory, "${draft.id}_orig.jpg")
+            val proc = File(sessionDirectory, "${draft.id}_proc.jpg")
+            FileOutputStream(orig).use { origBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            FileOutputStream(proc).use { procBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            draft.copy(
+                sessionOrigPath = orig.absolutePath,
+                sessionProcPath = proc.absolutePath,
+                originalBitmap = null,
+                processedBitmap = null
+            )
+        }.getOrDefault(draft)
+        if (persisted.originalBitmap == null) {
+            // recycle() is idempotent; original and processed can be the same instance.
+            draft.originalBitmap?.recycle()
+            draft.processedBitmap?.recycle()
+        }
+        return persisted
+    }
+
+    /** Rewrites only the processed session JPEG after an edit (crop/filter/rotate). */
+    private fun persistProcessed(draft: ScannedPageDraft): ScannedPageDraft {
+        val procBitmap = draft.processedBitmap ?: return draft
+        return runCatching {
+            sessionDirectory.mkdirs()
+            val proc = File(sessionDirectory, "${draft.id}_proc.jpg")
+            FileOutputStream(proc).use { procBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            draft.copy(sessionProcPath = proc.absolutePath)
+        }.getOrDefault(draft)
+    }
+
+    // endregion
+
+    // region Decoding
+
+    /** Decodes a gallery image, downsampling to [MAX_PAGE_DIM] and fixing EXIF orientation. */
+    private fun decodeImageUri(uri: Uri): List<Bitmap> {
+        val resolver: ContentResolver = getApplication<Application>().contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            ?: return emptyList()
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return emptyList()
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_PAGE_DIM) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            ?: return emptyList()
+        return listOf(applyExifOrientation(resolver, uri, decoded))
+    }
+
+    /** Renders each page of a PDF document to a bitmap (white background, capped page count). */
+    private fun decodePdfUri(uri: Uri): List<Bitmap> {
+        val resolver: ContentResolver = getApplication<Application>().contentResolver
+        val bitmaps = mutableListOf<Bitmap>()
+        val pfd = try {
+            resolver.openFileDescriptor(uri, "r")
+        } catch (t: Throwable) {
+            Log.e("ScanViewModel", "Cannot open PDF $uri", t)
+            null
+        } ?: return emptyList()
+        var renderer: PdfRenderer? = null
+        try {
+            renderer = PdfRenderer(pfd)
+            val count = minOf(renderer.pageCount, MAX_PDF_PAGES_PER_FILE)
+            for (i in 0 until count) {
+                var page: PdfRenderer.Page? = null
+                try {
+                    page = renderer.openPage(i)
+                    val scale = PDF_RENDER_LONG_EDGE / maxOf(page.width, page.height).toFloat()
+                    val w = (page.width * scale).toInt().coerceAtLeast(1)
+                    val h = (page.height * scale).toInt().coerceAtLeast(1)
+                    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(android.graphics.Color.WHITE)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    bitmaps += bitmap
+                } finally {
+                    page?.close()
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e("ScanViewModel", "PDF rendering failed for $uri", t)
+            bitmaps.forEach { it.recycle() }
+            bitmaps.clear()
+        } finally {
+            runCatching { renderer?.close() }
+            runCatching { pfd.close() }
+        }
+        return bitmaps
+    }
+
+    private fun applyExifOrientation(resolver: ContentResolver, uri: Uri, bitmap: Bitmap): Bitmap {
+        val orientation = try {
+            resolver.openInputStream(uri)?.use { stream ->
+                ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        } catch (_: Throwable) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.preScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.preScale(-1f, 1f) }
+            else -> return bitmap
+        }
+        val result = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (result !== bitmap) bitmap.recycle()
+        return result
+    }
+
+    // endregion
 
     private fun fingerprintOf(bitmap: Bitmap): LongArray {
         val scaled = Bitmap.createScaledBitmap(bitmap, 32, 32, true)
@@ -639,19 +887,45 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         return Bitmap.createScaledBitmap(bitmap, w, h, true)
     }
 
-    /** Pages survive process death: JPEG copies in cache, restored on next launch. */
-    private fun persistDraft(draft: ScannedPageDraft) {
-        runCatching {
-            sessionDirectory.mkdirs()
-            val orig = File(sessionDirectory, "${draft.id}_orig.jpg")
-            val proc = File(sessionDirectory, "${draft.id}_proc.jpg")
-            FileOutputStream(orig).use { draft.originalBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-            FileOutputStream(proc).use { draft.processedBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-            draft.sessionOrigPath = orig.absolutePath
-            draft.sessionProcPath = proc.absolutePath
-        }
+    private fun downscaleTo(bitmap: Bitmap, maxDim: Int): Bitmap {
+        val longest = maxOf(bitmap.width, bitmap.height)
+        if (longest <= maxDim) return bitmap
+        val scale = maxDim.toFloat() / longest
+        val scaled = Bitmap.createScaledBitmap(
+            bitmap,
+            (bitmap.width * scale).toInt().coerceAtLeast(1),
+            (bitmap.height * scale).toInt().coerceAtLeast(1),
+            true
+        )
+        if (scaled !== bitmap) bitmap.recycle()
+        return scaled
     }
 
+    private fun decodeScaled(path: String, maxDim: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxDim) sample *= 2
+        val decoded = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+            ?: return null
+        return downscaleTo(decoded, maxDim)
+    }
+
+    private fun decodeImageSize(path: String): Pair<Int, Int> {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, opts)
+        return opts.outWidth to opts.outHeight
+    }
+
+    private fun toPixelCorners(corners: QuadCorners, bitmap: Bitmap): QuadCorners = QuadCorners(
+        android.graphics.PointF(corners.topLeft.x * bitmap.width, corners.topLeft.y * bitmap.height),
+        android.graphics.PointF(corners.topRight.x * bitmap.width, corners.topRight.y * bitmap.height),
+        android.graphics.PointF(corners.bottomRight.x * bitmap.width, corners.bottomRight.y * bitmap.height),
+        android.graphics.PointF(corners.bottomLeft.x * bitmap.width, corners.bottomLeft.y * bitmap.height)
+    )
+
+    /** Pages survive process death: JPEG copies in cache, restored on next launch. */
     private fun restoreSessionIfNeeded() {
         val files = sessionDirectory.listFiles().orEmpty()
         if (files.isEmpty()) return
@@ -660,13 +934,12 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             val originals = files.filter { it.name.endsWith("_orig.jpg") }
             for (orig in originals) {
                 val proc = File(sessionDirectory, orig.name.replace("_orig.jpg", "_proc.jpg"))
-                val origBitmap = BitmapFactory.decodeFile(orig.absolutePath) ?: continue
-                val procBitmap = BitmapFactory.decodeFile(proc.absolutePath) ?: origBitmap
+                val thumb = decodeScaled(proc.absolutePath, 160)
+                    ?: decodeScaled(orig.absolutePath, 160)
+                    ?: continue
                 drafts += ScannedPageDraft(
                     id = orig.name.removeSuffix("_orig.jpg"),
-                    originalBitmap = origBitmap,
-                    processedBitmap = procBitmap,
-                    thumbnail = scaleForThumbnail(procBitmap),
+                    thumbnail = thumb,
                     corners = QuadCorners.defaultQuad(1f, 1f),
                     sessionOrigPath = orig.absolutePath,
                     sessionProcPath = proc.absolutePath
@@ -685,16 +958,16 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         sessionDirectory.listFiles()?.forEach { it.delete() }
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        ocrEngine.close()
-    }
-
     companion object {
         private const val QR_DUPLICATE_SUPPRESS_MS = 2000L
         private const val REGION_FRACTION = 0.7f
         private const val CAPTURE_TIMEOUT_MS = 8000L
         private const val AUTO_CAPTURE_MIN_INTERVAL_MS = 2500L
+
+        /** Longest edge kept in memory and on disk for a page. */
+        private const val MAX_PAGE_DIM = 2560
+        private const val PDF_RENDER_LONG_EDGE = 2200
+        private const val MAX_PDF_PAGES_PER_FILE = 60
     }
 }
 
