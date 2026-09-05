@@ -189,7 +189,7 @@ Before publishing:
 
 ## Support the project
 
-Doc Scanner is developed as free and open-source software. If it is useful to you, you can support continued development:
+Doc Scanner Pro is developed as free and open-source software. If it is useful to you, you can support continued development:
 
 https://ko-fi.com/rebelroot
 
@@ -197,7 +197,7 @@ Support is optional and the application remains fully functional without an acco
 
 ## License
 
-Doc Scanner is released under the MIT License. Third-party components retain their own licenses.
+Doc Scanner Pro is released under the MIT License. Third-party components retain their own licenses.
 
 ## Contributing
 
