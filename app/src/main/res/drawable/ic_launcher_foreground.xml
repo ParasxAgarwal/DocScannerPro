@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- document page -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 42.5,37 H 65.5 Q 69,37 69,40.5 V 67.5 Q 69,71 65.5,71 H 42.5 Q 39,71 39,67.5 V 40.5 Q 39,37 42.5,37 Z" />
+    <!-- scanned region under the beam -->
+    <path
+        android:fillColor="#4022D3EE"
+        android:pathData="M 39,66.5 H 69 V 71 H 39 Z" />
+    <!-- scan beam -->
+    <path
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M 38,64.5 H 70" />
+    <!-- page content: heading and text lines -->
+    <path
+        android:strokeColor="#2563EB"
+        android:strokeWidth="4.2"
+        android:strokeLineCap="round"
+        android:pathData="M 44.75,44.5 H 59" />
+    <path
+        android:strokeColor="#2563EB"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M 44.75,51 H 63.25" />
+    <path
+        android:strokeColor="#2563EB"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M 44.75,57.5 H 57.5" />
+    <!-- viewfinder corner brackets -->
+    <path
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M 31,44 V 39 Q 31,31 39,31 H 44 M 64,31 H 69 Q 77,31 77,39 V 44 M 77,64 V 69 Q 77,77 69,77 H 64 M 44,77 H 39 Q 31,77 31,69 V 64" />
+</vector>

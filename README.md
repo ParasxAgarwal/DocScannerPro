@@ -1,6 +1,6 @@
-# Doc Scanner
+# Doc Scanner Pro
 
-Doc Scanner is an offline-first Android application for capturing, processing, organizing and exporting physical documents.
+Doc Scanner Pro is an offline-first Android application for capturing, processing, organizing and exporting physical documents.
 
 It is designed as a local document workstation rather than a cloud service. Scans, OCR results, notes, metadata and exports remain on the device unless the user explicitly chooses an Android share, export or print action.
 

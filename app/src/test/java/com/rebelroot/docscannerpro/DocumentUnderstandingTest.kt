@@ -22,7 +22,7 @@ class DocumentUnderstandingTest {
     fun `read string from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("Doc Scanner", appName)
+        assertEquals("Doc Scanner Pro", appName)
     }
 
     @Test

@@ -1,6 +1,6 @@
 # UI Design
 
-Doc Scanner uses a document-first Android layout built around native touch patterns and restrained visual hierarchy.
+Doc Scanner Pro uses a document-first Android layout built around native touch patterns and restrained visual hierarchy.
 
 The library emphasizes readable lists, compact actions, contextual menus, simple category tabs, and a persistent scan action. Documents are the primary content and specialized capture modes live under Tools.
 

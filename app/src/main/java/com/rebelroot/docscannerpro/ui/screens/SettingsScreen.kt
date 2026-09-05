@@ -199,7 +199,7 @@ fun SettingsScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Doc Scanner is free and open source. If the app is useful to you, you can support its continued development.",
+                            text = "Doc Scanner Pro is free and open source. If the app is useful to you, you can support its continued development.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline
                         )
@@ -229,7 +229,7 @@ fun SettingsScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Doc Scanner 2.1\nBuilt with Kotlin, Jetpack Compose, CameraX, Room, OpenCV, ZXing, and Tesseract4Android.",
+                            text = "Doc Scanner Pro 2.1\nBuilt with Kotlin, Jetpack Compose, CameraX, Room, OpenCV, ZXing, and Tesseract4Android.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline
                         )

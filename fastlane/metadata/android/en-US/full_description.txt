@@ -1,4 +1,4 @@
-Doc Scanner is a native Android document utility for capturing, organizing, editing and exporting paper documents without an account or cloud service.
+Doc Scanner Pro is a native Android document utility for capturing, organizing, editing and exporting paper documents without an account or cloud service.
 
 Capture documents with automatic edge detection, perspective correction and multi-page scanning. Use dedicated workflows for documents, books, receipts, identity cards, business cards and barcodes.
 
@@ -18,4 +18,4 @@ Create and work with local documents:
 
 Privacy is part of the architecture. There is no sign-in, cloud sync, backend, advertising SDK or telemetry service in the application. Documents stay on the device unless you deliberately export or share them through Android.
 
-Doc Scanner is built with Kotlin, Jetpack Compose, CameraX, OpenCV and other open-source components. See the repository for the complete dependency and license information.
+Doc Scanner Pro is built with Kotlin, Jetpack Compose, CameraX, OpenCV and other open-source components. See the repository for the complete dependency and license information.

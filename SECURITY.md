@@ -1,6 +1,6 @@
 # Security
 
-Doc Scanner is designed to keep document content on the local device.
+Doc Scanner Pro is designed to keep document content on the local device.
 
 ## Reporting a vulnerability
 

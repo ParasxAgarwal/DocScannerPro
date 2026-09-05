@@ -21,5 +21,5 @@ dependencyResolutionManagement {
     maven { url = uri("https://jitpack.io") }
   }
 }
-rootProject.name = "Doc Scanner"
+rootProject.name = "Doc Scanner Pro"
 include(":app")

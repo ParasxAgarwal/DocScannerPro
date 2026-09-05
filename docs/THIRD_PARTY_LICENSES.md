@@ -1,6 +1,6 @@
 # Third-party licenses
 
-Doc Scanner is released under the MIT License. Third-party components retain their own licenses.
+Doc Scanner Pro is released under the MIT License. Third-party components retain their own licenses.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -20,4 +20,4 @@ The Tesseract4Android library is built from source for the official F-Droid buil
 
 The bundled trained-data files are distributed locally so OCR does not require a network connection.
 
-The icon is authored for Doc Scanner and stored as Android vector resources.
+The icon is authored for Doc Scanner Pro and stored as Android vector resources.

@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for contributing to Doc Scanner.
+Thank you for contributing to Doc Scanner Pro.
 
 ## Development principles
 
