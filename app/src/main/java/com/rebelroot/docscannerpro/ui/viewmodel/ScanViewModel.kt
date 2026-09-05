@@ -92,9 +92,12 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     private val barcodeEngine = BarcodeEngine()
     private val bookScanner = BookScanner()
     private val qrHistoryStore = QrHistoryStore(application)
-    private val sessionDirectory = File(application.cacheDir, "scanner_session")
+    // filesDir, not cacheDir: the OS may wipe cache at any time, which would
+    // silently destroy unsaved pages and break the crash-recovery guarantee.
+    private val sessionDirectory = File(application.filesDir, "scanner_session")
 
     private var lastCapturedFingerprint: LongArray? = null
+    private var lastAutoCaptureAtMillis: Long = 0L
     private var lastQrRawValue: String? = null
     private var lastQrAtMillis: Long = 0L
 
@@ -216,11 +219,14 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             editingPage.value == null &&
             captureState.value == CaptureState.Idle
         ) {
-            val fingerprint = fingerprintOf(bitmap)
+            val now = System.currentTimeMillis()
+            val fingerprint = fingerprintOf(cropToQuad(bitmap, result.corners))
             val previous = lastCapturedFingerprint
             val isNewContent = previous == null || !PageFingerprint.areSamePage(previous, fingerprint)
-            if (isNewContent) {
+            val intervalElapsed = now - lastAutoCaptureAtMillis >= AUTO_CAPTURE_MIN_INTERVAL_MS
+            if (isNewContent && intervalElapsed) {
                 lastCapturedFingerprint = fingerprint
+                lastAutoCaptureAtMillis = now
                 captureFrame(bitmap)
             }
         }
@@ -532,6 +538,25 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         return PageFingerprint.computeHash(gray)
     }
 
+    /**
+     * Crops the detected document region (with margin) so page fingerprints
+     * track the page itself — background motion or animated scenery must not
+     * be mistaken for a page turn.
+     */
+    private fun cropToQuad(bitmap: Bitmap, corners: QuadCorners): Bitmap {
+        val xs = listOf(corners.topLeft.x, corners.topRight.x, corners.bottomRight.x, corners.bottomLeft.x)
+        val ys = listOf(corners.topLeft.y, corners.topRight.y, corners.bottomRight.y, corners.bottomLeft.y)
+        val margin = 0.04f
+        val left = ((xs.min()) - margin).coerceIn(0f, 1f)
+        val right = ((xs.max()) + margin).coerceIn(0f, 1f)
+        val top = ((ys.min()) - margin).coerceIn(0f, 1f)
+        val bottom = ((ys.max()) + margin).coerceIn(0f, 1f)
+        val w = ((right - left) * bitmap.width).toInt()
+        val h = ((bottom - top) * bitmap.height).toInt()
+        if (w < 8 || h < 8) return bitmap
+        return Bitmap.createBitmap(bitmap, (left * bitmap.width).toInt(), (top * bitmap.height).toInt(), w, h)
+    }
+
     private fun cropCenterRegion(bitmap: Bitmap, fraction: Float): Bitmap {
         val side = (minOf(bitmap.width, bitmap.height) * fraction).toInt()
             .coerceIn(1, minOf(bitmap.width, bitmap.height))
@@ -603,6 +628,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         private const val QR_DUPLICATE_SUPPRESS_MS = 2000L
         private const val REGION_FRACTION = 0.7f
         private const val CAPTURE_TIMEOUT_MS = 8000L
+        private const val AUTO_CAPTURE_MIN_INTERVAL_MS = 2500L
     }
 }
 

@@ -5,8 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -847,11 +845,19 @@ private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
                         if (uIndex < uCount && offset < nv21.size) nv21[offset++] = uRow[uIndex]
                     }
                 }
-                val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-                val stream = java.io.ByteArrayOutputStream()
-                yuv.compressToJpeg(Rect(0, 0, width, height), 85, stream)
-                val raw = BitmapFactory.decodeByteArray(stream.toByteArray(), 0, stream.size()) ?: return null
-                rotateBitmap(raw, image.imageInfo.rotationDegrees)
+                // Use OpenCV to convert YUV NV21 directly to RGBA — no JPEG encode/decode round-trip
+                // which eliminates the ~1 MB/sec GC pressure from the old YuvImage→BitmapFactory path.
+                val nv21Mat = org.opencv.core.Mat(height * 3 / 2, width, org.opencv.core.CvType.CV_8UC1)
+                nv21Mat.put(0, 0, nv21)
+                val rgbaMat = org.opencv.core.Mat(height, width, org.opencv.core.CvType.CV_8UC4)
+                org.opencv.imgproc.Imgproc.cvtColor(nv21Mat, rgbaMat, org.opencv.imgproc.Imgproc.COLOR_YUV2RGBA_NV21)
+                nv21Mat.release()
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val buffer = java.nio.ByteBuffer.allocate(width * height * 4)
+                rgbaMat.get(0, 0, buffer.array())
+                bitmap.copyPixelsFromBuffer(buffer)
+                rgbaMat.release()
+                rotateBitmap(bitmap, image.imageInfo.rotationDegrees)
             }
             else -> null
         }

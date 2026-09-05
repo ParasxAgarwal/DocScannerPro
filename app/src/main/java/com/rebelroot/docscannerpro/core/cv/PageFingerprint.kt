@@ -49,9 +49,10 @@ object PageFingerprint {
 
     /**
      * True when two fingerprints represent the same page content.
-     * Threshold tuned for page turns: same page under small camera noise
-     * differs by ~0-8%, a genuinely different page by far more.
+     * Threshold tuned with hysteresis in mind: camera noise, small exposure
+     * shifts and minor background motion must read as the SAME page, while a
+     * genuinely turned page differs by far more.
      */
     fun areSamePage(a: LongArray, b: LongArray): Boolean =
-        hammingDistance(a, b) <= (GRID * GRID * 0.06f).toInt()
+        hammingDistance(a, b) <= (GRID * GRID * 0.10f).toInt()
 }
