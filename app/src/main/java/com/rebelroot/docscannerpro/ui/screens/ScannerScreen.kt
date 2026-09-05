@@ -1,0 +1,666 @@
+package com.rebelroot.docscannerpro.ui.screens
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.graphics.ImageFormat
+import android.graphics.YuvImage
+import android.graphics.Rect
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
+import com.rebelroot.docscannerpro.core.model.BarcodeType
+import com.rebelroot.docscannerpro.core.model.QuadCorners
+import com.rebelroot.docscannerpro.ui.viewmodel.IdCardSide
+import com.rebelroot.docscannerpro.ui.viewmodel.ScanMode
+import com.rebelroot.docscannerpro.ui.viewmodel.ScanViewModel
+import java.io.File
+import java.util.concurrent.Executors
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+@Composable
+fun ScannerScreen(
+    viewModel: ScanViewModel,
+    onClose: () -> Unit,
+    onNavigateToCrop: () -> Unit,
+    onBatchFinished: (documentId: String) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scanMode by viewModel.scanMode.collectAsState()
+    val idSide by viewModel.idCardSide.collectAsState()
+    val isFlashOn by viewModel.isFlashOn.collectAsState()
+    val isAutoCapture by viewModel.isAutoCaptureEnabled.collectAsState()
+    val detectedCorners by viewModel.detectedCorners.collectAsState()
+    val hasRealDetection by viewModel.hasRealDetection.collectAsState()
+    val guidanceMessage by viewModel.guidanceMessage.collectAsState()
+    val isStable by viewModel.isStableAndReady.collectAsState()
+    val capturedPages by viewModel.capturedPages.collectAsState()
+    val isProcessing by viewModel.isProcessing.collectAsState()
+    val scannedBarcode by viewModel.scannedBarcode.collectAsState()
+    val analyzedFrameSize by viewModel.analyzedFrameSize.collectAsState()
+    var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
+    var cameraControl: androidx.camera.core.CameraControl? by remember { mutableStateOf(null) }
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) {
+        val window = (context as? android.app.Activity)?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            cameraExecutor.shutdown()
+        }
+    }
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                val bitmap = BitmapFactory.decodeStream(inputStream)
+                inputStream?.close()
+                if (bitmap != null) {
+                    viewModel.captureFrame(bitmap)
+                    onNavigateToCrop()
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+    LaunchedEffect(isFlashOn) {
+        cameraControl?.enableTorch(isFlashOn)
+    }
+    val editingPage by viewModel.editingPage.collectAsState()
+    LaunchedEffect(editingPage?.id, scanMode) {
+        if (editingPage != null && scanMode != ScanMode.MULTI_PAGE && scanMode != ScanMode.BOOK) {
+            onNavigateToCrop()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                val previewView = PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                }
+                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                val executor = ContextCompat.getMainExecutor(ctx)
+                val analysisExecutor = cameraExecutor
+                cameraProviderFuture.addListener({
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
+                    val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+                    val capture = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setTargetRotation(rotation)
+                        .build()
+                    imageCapture = capture
+                    val analysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setTargetRotation(rotation)
+                        .build()
+                        .also { analyzer ->
+                            var lastAnalysisNanos = 0L
+                        analyzer.setAnalyzer(analysisExecutor) { imageProxy ->
+                            val now = System.nanoTime()
+                            if (now - lastAnalysisNanos < 90_000_000L) {
+                                imageProxy.close()
+                                return@setAnalyzer
+                            }
+                            lastAnalysisNanos = now
+                            val bitmap = imageProxyToBitmap(imageProxy)
+                            imageProxy.close()
+                            if (bitmap != null) viewModel.onFrameAnalyzed(bitmap)
+                        }
+                        }
+                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    try {
+                        cameraProvider.unbindAll()
+                        val cam = cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            capture,
+                            analysis
+                        )
+                        cameraControl = cam.cameraControl
+                    } catch (_: Exception) {
+                    }
+                }, executor)
+                previewView
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+        DocumentQuadOverlay(
+            corners = detectedCorners,
+            isRealDetection = hasRealDetection,
+            isStable = isStable,
+            scanMode = scanMode,
+            idCardSide = idSide,
+            sourceWidth = analyzedFrameSize.width,
+            sourceHeight = analyzedFrameSize.height
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 18.dp, start = 14.dp, end = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            ScannerControlButton(
+                icon = Icons.Default.Close,
+                description = "Close",
+                onClick = onClose,
+                selected = false,
+                modifier = Modifier.testTag("btn_close_scanner")
+            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Black.copy(alpha = 0.50f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(if (isStable) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.72f))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = guidanceMessage,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.Black.copy(alpha = 0.32f)
+                ) {
+                    Text(
+                        text = when (scanMode) {
+                            ScanMode.DOCUMENT -> "Document"
+                            ScanMode.ID_CARD -> "ID card ${if (idSide == IdCardSide.FRONT) "· Front" else "· Back"}"
+                            ScanMode.RECEIPT -> "Receipt"
+                            ScanMode.BUSINESS_CARD -> "Business card"
+                            ScanMode.BOOK -> "Book"
+                            ScanMode.QR_BARCODE -> "QR / Barcode"
+                            ScanMode.MULTI_PAGE -> "Document"
+                        },
+                        color = Color.White.copy(alpha = 0.9f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScannerControlButton(
+                    icon = Icons.Default.CenterFocusStrong,
+                    description = if (isAutoCapture) "Auto capture on" else "Auto capture off",
+                    onClick = { viewModel.toggleAutoCapture() },
+                    selected = isAutoCapture
+                )
+                ScannerControlButton(
+                    icon = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                    description = if (isFlashOn) "Flash off" else "Flash on",
+                    onClick = { viewModel.toggleFlash() },
+                    selected = isFlashOn
+                )
+            }
+        }
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.62f))
+                .padding(top = 8.dp, bottom = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (capturedPages.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.White.copy(alpha = 0.12f)
+                ) {
+                    Text(
+                        text = "${capturedPages.size} ${if (capturedPages.size == 1) "page" else "pages"}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(22.dp),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                modifier = Modifier.padding(bottom = 11.dp)
+            ) {
+                items(listOf(ScanMode.DOCUMENT, ScanMode.ID_CARD, ScanMode.RECEIPT, ScanMode.BUSINESS_CARD, ScanMode.BOOK, ScanMode.QR_BARCODE)) { mode ->
+                    val isSelected = scanMode == mode
+                    val label = when (mode) {
+                        ScanMode.DOCUMENT -> "Document"
+                        ScanMode.ID_CARD -> "ID card"
+                        ScanMode.RECEIPT -> "Receipt"
+                        ScanMode.BUSINESS_CARD -> "Card"
+                        ScanMode.BOOK -> "Book"
+                        ScanMode.QR_BARCODE -> "QR / Barcode"
+                        ScanMode.MULTI_PAGE -> "Document"
+                    }
+                    Column(
+                        modifier = Modifier.clickable { viewModel.setScanMode(mode) }.padding(vertical = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            label,
+                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.58f),
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(if (isSelected) 18.dp else 0.dp)
+                                .height(2.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF5AA7FF))
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ScannerUtilityButton(
+                    icon = Icons.Default.PhotoLibrary,
+                    label = "Import",
+                    onClick = {
+                        photoPicker.launch(
+                            androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    testTag = "btn_gallery_import"
+                )
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(84.dp)
+                        .clickable(enabled = !isProcessing) {
+                            imageCapture?.takePicture(
+                                cameraExecutor,
+                                object : ImageCapture.OnImageCapturedCallback() {
+                                    override fun onCaptureSuccess(image: ImageProxy) {
+                                        val bitmap = imageProxyToBitmap(image)
+                                        image.close()
+                                        if (bitmap != null) viewModel.captureFrame(bitmap)
+                                    }
+                                    override fun onError(exception: ImageCaptureException) = Unit
+                                }
+                            )
+                        }
+                        .testTag("btn_shutter")
+                ) {
+                    Canvas(modifier = Modifier.size(84.dp)) {
+                        drawCircle(
+                            color = if (isStable) Color(0xFF5AA7FF) else Color.White.copy(alpha = 0.88f),
+                            style = Stroke(width = 3.5.dp.toPx())
+                        )
+                    }
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isProcessing) Color(0xFFB9B9BC) else Color.White,
+                        modifier = Modifier.size(68.dp),
+                        shadowElevation = 3.dp
+                    ) {
+                        if (isProcessing) {
+                            Box(contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = Color(0xFF3D3D42), modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                            }
+                        }
+                    }
+                }
+                if (capturedPages.isNotEmpty()) {
+                    ScannerUtilityButton(
+                        icon = Icons.Default.Check,
+                        label = "Done",
+                        onClick = { viewModel.finishBatchAndSave { docId -> onBatchFinished(docId) } },
+                        testTag = "btn_finish_batch"
+                    )
+                } else {
+                    Box(Modifier.size(58.dp))
+                }
+            }
+        }
+        scannedBarcode?.let { barcode ->
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissScannedBarcode() },
+                title = { Text(barcode.formatName) },
+                text = {
+                    Column {
+                        Text(
+                            text = barcode.displayValue,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Type: ${barcode.type}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                    }
+                },
+                confirmButton = {
+                    if (barcode.type == BarcodeType.URL) {
+                        Button(
+                            onClick = {
+                                try {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(barcode.rawValue))
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {
+                                }
+                                viewModel.dismissScannedBarcode()
+                            }
+                        ) {
+                            Text("Open Link")
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Barcode", barcode.rawValue))
+                                viewModel.dismissScannedBarcode()
+                            }
+                        ) {
+                            Text("Copy Text")
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissScannedBarcode() }) {
+                        Text("Close")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScannerControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    onClick: () -> Unit,
+    selected: Boolean,
+    modifier: Modifier = Modifier
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = modifier
+            .size(44.dp)
+            .background(if (selected) Color(0xFF2D82C7).copy(alpha = 0.86f) else Color.Black.copy(alpha = 0.48f), CircleShape)
+    ) {
+        Icon(icon, contentDescription = description, tint = Color.White, modifier = Modifier.size(21.dp))
+    }
+}
+
+@Composable
+private fun ScannerUtilityButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(58.dp)) {
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier
+                .size(50.dp)
+                .background(Color.Black.copy(alpha = 0.42f), CircleShape)
+                .testTag(testTag)
+        ) {
+            Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(23.dp))
+        }
+        Spacer(Modifier.height(3.dp))
+        Text(label, color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+fun DocumentQuadOverlay(
+    corners: QuadCorners,
+    isRealDetection: Boolean,
+    isStable: Boolean,
+    scanMode: ScanMode,
+    idCardSide: IdCardSide,
+    sourceWidth: Int,
+    sourceHeight: Int
+) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val viewW = size.width
+        val viewH = size.height
+        val srcW = sourceWidth.toFloat().coerceAtLeast(1f)
+        val srcH = sourceHeight.toFloat().coerceAtLeast(1f)
+        val scale = maxOf(viewW / srcW, viewH / srcH)
+        val renderedW = srcW * scale
+        val renderedH = srcH * scale
+        val offsetX = (viewW - renderedW) / 2f
+        val offsetY = (viewH - renderedH) / 2f
+        fun map(p: android.graphics.PointF): Offset = Offset(
+            p.x * renderedW + offsetX,
+            p.y * renderedH + offsetY
+        )
+        val p1 = map(corners.topLeft)
+        val p2 = map(corners.topRight)
+        val p3 = map(corners.bottomRight)
+        val p4 = map(corners.bottomLeft)
+        val quadColor = if (isStable) Color(0xFF43A047) else Color.White.copy(alpha = 0.88f)
+        if (isRealDetection) {
+            val path = Path().apply {
+                moveTo(p1.x, p1.y)
+                lineTo(p2.x, p2.y)
+                lineTo(p3.x, p3.y)
+                lineTo(p4.x, p4.y)
+                close()
+            }
+            drawPath(path, color = Color.Black.copy(alpha = 0.42f), style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round))
+            drawPath(path, color = quadColor, style = Stroke(width = if (isStable) 3.5.dp.toPx() else 2.dp.toPx(), cap = StrokeCap.Round))
+            if (scanMode == ScanMode.BOOK) {
+                val topMid = Offset((p1.x + p2.x) / 2f, (p1.y + p2.y) / 2f)
+                val bottomMid = Offset((p4.x + p3.x) / 2f, (p4.y + p3.y) / 2f)
+                drawLine(Color.White.copy(alpha = 0.6f), topMid, bottomMid, strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+            }
+            val bracket = 22.dp.toPx()
+            listOf(
+                p1 to Offset(1f, 1f),
+                p2 to Offset(-1f, 1f),
+                p3 to Offset(-1f, -1f),
+                p4 to Offset(1f, -1f)
+            ).forEach { (p, dir) ->
+                drawLine(quadColor, p, p + Offset(bracket * dir.x, 0f), strokeWidth = 4.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(quadColor, p, p + Offset(0f, bracket * dir.y), strokeWidth = 4.dp.toPx(), cap = StrokeCap.Round)
+            }
+        } else {
+            val left = size.width * 0.09f
+            val right = size.width * 0.91f
+            val top = when (scanMode) {
+                ScanMode.ID_CARD, ScanMode.BUSINESS_CARD -> size.height * 0.36f
+                ScanMode.BOOK -> size.height * 0.28f
+                else -> size.height * 0.23f
+            }
+            val bottom = when (scanMode) {
+                ScanMode.ID_CARD, ScanMode.BUSINESS_CARD -> size.height * 0.64f
+                ScanMode.BOOK -> size.height * 0.72f
+                else -> size.height * 0.77f
+            }
+            val guide = 24.dp.toPx()
+            val c = Color.White.copy(alpha = 0.48f)
+            drawLine(c, Offset(left, top), Offset(left + guide, top), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(left, top), Offset(left, top + guide), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(right, top), Offset(right - guide, top), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(right, top), Offset(right, top + guide), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(left, bottom), Offset(left + guide, bottom), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(left, bottom), Offset(left, bottom - guide), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(right, bottom), Offset(right - guide, bottom), 3.dp.toPx(), StrokeCap.Round)
+            drawLine(c, Offset(right, bottom), Offset(right, bottom - guide), 3.dp.toPx(), StrokeCap.Round)
+        }
+    }
+}
+private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
+    return try {
+        when (image.format) {
+            ImageFormat.YUV_420_888 -> {
+                val width = image.width
+                val height = image.height
+                val y = image.planes[0]
+                val u = image.planes[1]
+                val v = image.planes[2]
+                val nv21 = ByteArray(width * height + width * height / 2)
+                copyPlane(y, width, height, nv21, 0)
+                var offset = width * height
+                val chromaH = height / 2
+                val chromaW = width / 2
+                val uRow = ByteArray(u.rowStride)
+                val vRow = ByteArray(v.rowStride)
+                for (row in 0 until chromaH) {
+                    val uBuffer = u.buffer.duplicate().apply { position(row * u.rowStride) }
+                    val vBuffer = v.buffer.duplicate().apply { position(row * v.rowStride) }
+                    val uCount = minOf(uRow.size, uBuffer.remaining())
+                    val vCount = minOf(vRow.size, vBuffer.remaining())
+                    uBuffer.get(uRow, 0, uCount)
+                    vBuffer.get(vRow, 0, vCount)
+                    for (col in 0 until chromaW) {
+                        val uIndex = col * u.pixelStride
+                        val vIndex = col * v.pixelStride
+                        if (vIndex < vCount && offset < nv21.size) nv21[offset++] = vRow[vIndex]
+                        if (uIndex < uCount && offset < nv21.size) nv21[offset++] = uRow[uIndex]
+                    }
+                }
+                val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+                val stream = java.io.ByteArrayOutputStream()
+                yuv.compressToJpeg(Rect(0, 0, width, height), 92, stream)
+                val raw = BitmapFactory.decodeByteArray(stream.toByteArray(), 0, stream.size()) ?: return null
+                rotateBitmap(raw, image.imageInfo.rotationDegrees)
+            }
+            else -> null
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+private fun copyPlane(plane: ImageProxy.PlaneProxy, width: Int, height: Int, out: ByteArray, outOffset: Int, pixelStrideOverride: Int? = null) {
+    val buffer = plane.buffer.duplicate()
+    val rowStride = plane.rowStride
+    val pixelStride = pixelStrideOverride ?: plane.pixelStride
+    var output = outOffset
+    val row = ByteArray(rowStride)
+    for (r in 0 until height) {
+        buffer.position(minOf(r * rowStride, buffer.limit()))
+        val count = minOf(row.size, buffer.remaining())
+        buffer.get(row, 0, count)
+        for (c in 0 until width) {
+            val index = c * pixelStride
+            if (index < count && output < out.size) out[output++] = row[index]
+        }
+    }
+}
+private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+    if (degrees == 0) return bitmap
+    val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true).also {
+        if (it !== bitmap) bitmap.recycle()
+    }
+}
