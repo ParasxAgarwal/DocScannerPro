@@ -2,10 +2,10 @@ Categories:
   - Office
 License: MIT
 AuthorName: REBELROOT
-WebSite: https://github.com/ParasxAgarwal/DocScannerPro
-SourceCode: https://github.com/ParasxAgarwal/DocScannerPro
-IssueTracker: https://github.com/ParasxAgarwal/DocScannerPro/issues
-Changelog: https://github.com/ParasxAgarwal/DocScannerPro/blob/main/CHANGELOG.md
+WebSite: https://github.com/REBEL-ROOT/DocScannerPro
+SourceCode: https://github.com/REBEL-ROOT/DocScannerPro
+IssueTracker: https://github.com/REBEL-ROOT/DocScannerPro/issues
+Changelog: https://github.com/REBEL-ROOT/DocScannerPro/blob/main/CHANGELOG.md
 Donate:
   - https://ko-fi.com/rebelroot
 
@@ -21,7 +21,7 @@ Description: |
   The application does not request Internet access. Document contents remain on the device unless the user explicitly exports or shares them through Android.
 
 RepoType: git
-Repo: https://github.com/ParasxAgarwal/DocScannerPro.git
+Repo: https://github.com/REBEL-ROOT/DocScannerPro.git
 
 Builds:
   - versionName: 1.0
